@@ -1,0 +1,379 @@
+// ============================================================
+// CRT + TBS Auto Signal [Pro] — High Probability Edition
+// Candle Range Theory (CRT) + Time-Based Sessions (TBS)
+//                           + 1H HTF Alignment Filter
+// ============================================================
+// SIGNAL LOGIC (all must be TRUE):
+//  ✅ 1. CRT 3-candle pattern on current TF
+//  ✅ 2. Inside TBS kill zone session window
+//  ✅ 3. 1H Higher TimeFrame aligned (3 confluence checks)
+//  ✅ 4. Optional: current TF EMA + Volume confirmation
+//
+// 1H HTF ALIGNMENT — 3 confluence checks:
+//  → Check 1: Price above/below 1H EMA50
+//  → Check 2: Price above/below 1H EMA200
+//  → Check 3: Last 1H candle closed bullish/bearish
+//  Strict mode = all 3 must agree | Relaxed = 2 of 3
+// ============================================================
+
+//@version=5
+indicator("CRT + TBS + 1H HTF [High Probability]",
+     shorttitle = "CRT+TBS+HTF",
+     overlay    = true,
+     max_labels_count = 500,
+     max_lines_count  = 500,
+     max_boxes_count  = 500)
+
+// ─────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────
+grp_htf  = "📐 1H HTF Alignment (High Probability)"
+grp_crt  = "⚙️ CRT Settings"
+grp_tbs  = "⏰ TBS Session Windows"
+grp_sig  = "🎯 Signal & RR Settings"
+grp_filt = "🔍 Additional Filters"
+grp_col  = "🎨 Colors"
+
+// HTF
+use_htf_filter  = input.bool(true,  "Enable 1H HTF Alignment Filter", group=grp_htf)
+htf_tf          = input.timeframe("60", "HTF Timeframe", group=grp_htf)
+htf_ema_fast    = input.int(50,  "1H EMA Fast (trend bias)",  minval=5,  group=grp_htf)
+htf_ema_slow    = input.int(200, "1H EMA Slow (major trend)", minval=20, group=grp_htf)
+show_htf_emas   = input.bool(true, "Show 1H EMAs on chart", group=grp_htf)
+htf_require_all = input.bool(true, "Require ALL 3 HTF checks (strict mode)", group=grp_htf,
+     tooltip = "ON = all 3 checks must align → fewer but higher quality signals\nOFF = 2 of 3 checks → more signals")
+show_htf_bias   = input.bool(true, "Show 1H Bias label on chart", group=grp_htf)
+
+// CRT
+show_crt_boxes   = input.bool(true, "Show CRT Range Boxes",         group=grp_crt)
+show_manip_wicks = input.bool(true, "Show Manipulation Wick Lines", group=grp_crt)
+
+// TBS — Session Selector
+trade_session = input.string("London + New York", "Trade Only During Session",
+     options = ["London", "New York", "Asia", "London + New York", "London + Asia", "New York + Asia", "All Sessions"],
+     group   = grp_tbs,
+     tooltip = "Signals only fire inside the selected session window(s).\nLondon:   02:00-05:00 ET\nNew York: 08:30-15:00 ET\nAsia:     20:00-23:00 ET")
+london_start = input.session("0200-0500", "  London Time Window (ET)",   group=grp_tbs)
+ny_start     = input.session("0830-1500", "  New York Time Window (ET)", group=grp_tbs)
+asia_start   = input.session("2000-2300", "  Asia Time Window (ET)",     group=grp_tbs)
+
+// Signal & RR
+show_bull_sig  = input.bool(true,  "Show Bullish Signals", group=grp_sig)
+show_bear_sig  = input.bool(true,  "Show Bearish Signals", group=grp_sig)
+sig_label_size = input.string("normal", "Label Size", options=["tiny","small","normal","large"], group=grp_sig)
+show_rr_box    = input.bool(true,  "Show RR Shape (TradingView Style)", group=grp_sig)
+rr_ratio       = input.float(2.0,  "Risk:Reward Ratio",  minval=1.0, maxval=10.0, step=0.5, group=grp_sig)
+atr_mult_sl    = input.float(0.5,  "SL ATR Multiplier",  minval=0.1, maxval=3.0,  step=0.1, group=grp_sig)
+rr_box_width   = input.int(25, "RR Box Width (bars)", minval=5, maxval=150, step=5, group=grp_sig)
+
+// Extra filters
+use_ltf_ema    = input.bool(false, "Current TF EMA Filter", group=grp_filt)
+ltf_ema_len    = input.int(50, "Current TF EMA Length", minval=5, group=grp_filt)
+use_vol_filter = input.bool(false, "Volume Filter (above MA)", group=grp_filt)
+vol_len        = input.int(20, "Volume MA Length", group=grp_filt)
+
+// Colors
+bull_col     = input.color(color.new(#00E676, 0),  "Bullish Signal Color", group=grp_col)
+bear_col     = input.color(color.new(#FF1744, 0),  "Bearish Signal Color", group=grp_col)
+box_col      = input.color(color.new(#FFA726, 15), "CRT Box Color",        group=grp_col)
+htf_bull_col = input.color(color.new(#00BCD4, 40), "1H EMA Bull Color",    group=grp_col)
+htf_bear_col = input.color(color.new(#FF6F00, 40), "1H EMA Bear Color",    group=grp_col)
+
+// ─────────────────────────────────────────────
+// UTILITY
+// ─────────────────────────────────────────────
+f_label_size(s) =>
+    s == "tiny" ? size.tiny : s == "small" ? size.small : s == "large" ? size.large : size.normal
+
+atr14 = ta.atr(14)
+
+// ─────────────────────────────────────────────
+// 1H HTF ALIGNMENT — 3 CONFLUENCE CHECKS
+// ─────────────────────────────────────────────
+
+// Pull 1H data (no lookahead to avoid repainting)
+htf_close = request.security(syminfo.tickerid, htf_tf, close[1], lookahead=barmerge.lookahead_off)
+htf_open  = request.security(syminfo.tickerid, htf_tf, open[1],  lookahead=barmerge.lookahead_off)
+htf_ema_f = request.security(syminfo.tickerid, htf_tf, ta.ema(close, htf_ema_fast), lookahead=barmerge.lookahead_off)
+htf_ema_s = request.security(syminfo.tickerid, htf_tf, ta.ema(close, htf_ema_slow), lookahead=barmerge.lookahead_off)
+
+// Check 1: price vs 1H EMA50
+htf_c1_bull = close > htf_ema_f
+htf_c1_bear = close < htf_ema_f
+
+// Check 2: price vs 1H EMA200
+htf_c2_bull = close > htf_ema_s
+htf_c2_bear = close < htf_ema_s
+
+// Check 3: last 1H candle structure (closed bull/bear)
+htf_c3_bull = htf_close > htf_open
+htf_c3_bear = htf_close < htf_open
+
+// Score (0–3)
+htf_bull_score = (htf_c1_bull ? 1 : 0) + (htf_c2_bull ? 1 : 0) + (htf_c3_bull ? 1 : 0)
+htf_bear_score = (htf_c1_bear ? 1 : 0) + (htf_c2_bear ? 1 : 0) + (htf_c3_bear ? 1 : 0)
+
+htf_threshold = htf_require_all ? 3 : 2
+
+htf_bull_ok = not use_htf_filter or (htf_bull_score >= htf_threshold)
+htf_bear_ok = not use_htf_filter or (htf_bear_score >= htf_threshold)
+
+// ─────────────────────────────────────────────
+// Plot 1H EMAs
+// ─────────────────────────────────────────────
+plot(show_htf_emas ? htf_ema_f : na,
+     title="1H EMA50",
+     color=htf_c1_bull ? htf_bull_col : htf_bear_col,
+     linewidth=2)
+
+plot(show_htf_emas ? htf_ema_s : na,
+     title="1H EMA200",
+     color=htf_c2_bull ? color.new(#00BCD4, 65) : color.new(#FF6F00, 65),
+     linewidth=1)
+
+// ─────────────────────────────────────────────
+// 1H Bias floating label
+// ─────────────────────────────────────────────
+htf_bias_col = htf_bull_score > htf_bear_score ? color.new(#00E676, 0) :
+               htf_bear_score > htf_bull_score ? color.new(#FF1744, 0) :
+               color.new(#FFA726, 0)
+
+var label htf_label = na
+if show_htf_bias and barstate.islast
+    label.delete(htf_label)
+    htf_label := label.new(bar_index + 2, htf_ema_f,
+         (htf_bull_score > htf_bear_score ? "1H ▲ BULL " : htf_bear_score > htf_bull_score ? "1H ▼ BEAR " : "1H ◆ MIXED ") +
+         str.tostring(math.max(htf_bull_score, htf_bear_score)) + "/3" +
+         "\nEMA50:  " + str.tostring(math.round(htf_ema_f, 2)) +
+         "\nEMA200: " + str.tostring(math.round(htf_ema_s, 2)),
+         color     = color.new(#161B22, 5),
+         textcolor = htf_bias_col,
+         style     = label.style_label_left,
+         size      = size.small)
+
+// ─────────────────────────────────────────────
+// CURRENT TF FILTERS
+// ─────────────────────────────────────────────
+ltf_ema_val = ta.ema(close, ltf_ema_len)
+ltf_bull    = not use_ltf_ema or close > ltf_ema_val
+ltf_bear    = not use_ltf_ema or close < ltf_ema_val
+vol_ma      = ta.sma(volume, vol_len)
+vol_ok      = not use_vol_filter or volume > vol_ma
+
+// ─────────────────────────────────────────────
+// TBS SESSION DETECTION
+// ─────────────────────────────────────────────
+// Detect each session window
+in_london_raw = not na(time("", london_start, "America/New_York"))
+in_ny_raw     = not na(time("", ny_start,     "America/New_York"))
+in_asia_raw   = not na(time("", asia_start,   "America/New_York"))
+
+// Apply session selector — only enable windows matching the chosen session
+use_lon = trade_session == "London"           or trade_session == "London + New York" or
+          trade_session == "London + Asia"    or trade_session == "All Sessions"
+use_ny  = trade_session == "New York"         or trade_session == "London + New York" or
+          trade_session == "New York + Asia"  or trade_session == "All Sessions"
+use_asi = trade_session == "Asia"             or trade_session == "London + Asia"     or
+          trade_session == "New York + Asia"  or trade_session == "All Sessions"
+
+in_london  = use_lon and in_london_raw
+in_ny      = use_ny  and in_ny_raw
+in_asia    = use_asi and in_asia_raw
+in_session = in_london or in_ny or in_asia
+
+// Session background highlight
+bgcolor(in_london ? color.new(#42A5F5, 93) : na, title="London BG")
+bgcolor(in_ny     ? color.new(#66BB6A, 93) : na, title="New York BG")
+bgcolor(in_asia   ? color.new(#AB47BC, 93) : na, title="Asia BG")
+
+// ─────────────────────────────────────────────
+// CRT PATTERN DETECTION
+// ─────────────────────────────────────────────
+c1_high = high[2]
+c1_low  = low[2]
+
+c2_high  = high[1]
+c2_low   = low[1]
+c2_close = close[1]
+c2_open  = open[1]
+
+c2_sweep_high         = c2_high > c1_high
+c2_sweep_low          = c2_low  < c1_low
+c2_rejected_from_high = c2_sweep_high and c2_close < c1_high
+c2_rejected_from_low  = c2_sweep_low  and c2_close > c1_low
+
+c3_bull_confirm = close > c1_high
+c3_bear_confirm = close < c1_low
+
+crt_bull = c2_rejected_from_low  and c3_bull_confirm
+crt_bear = c2_rejected_from_high and c3_bear_confirm
+
+// ─────────────────────────────────────────────
+// FINAL SIGNAL — ALL LAYERS COMBINED
+//  CRT ✅  +  TBS ✅  +  1H HTF ✅  +  Filters ✅
+// ─────────────────────────────────────────────
+final_bull = crt_bull and in_session and htf_bull_ok and ltf_bull and vol_ok and show_bull_sig
+final_bear = crt_bear and in_session and htf_bear_ok and ltf_bear and vol_ok and show_bear_sig
+
+// ─────────────────────────────────────────────
+// CRT RANGE BOX
+// ─────────────────────────────────────────────
+if show_crt_boxes and (final_bull or final_bear)
+    box.new(bar_index - 2, c1_high, bar_index, c1_low,
+         border_color=box_col, border_width=1, bgcolor=color.new(box_col, 80))
+
+// ─────────────────────────────────────────────
+// MANIPULATION WICK MARKERS
+// ─────────────────────────────────────────────
+if show_manip_wicks and final_bull
+    line.new(bar_index - 1, c2_low, bar_index, c2_low,
+         color=color.new(bull_col, 30), width=2, style=line.style_dotted)
+
+if show_manip_wicks and final_bear
+    line.new(bar_index - 1, c2_high, bar_index, c2_high,
+         color=color.new(bear_col, 30), width=2, style=line.style_dotted)
+
+// ─────────────────────────────────────────────
+// RR SHAPE — TradingView Style
+// ─────────────────────────────────────────────
+if show_rr_box
+    if final_bull
+        entry_p = close
+        sl_p    = low  - (atr14 * atr_mult_sl)
+        tp_p    = entry_p + ((entry_p - sl_p) * rr_ratio)
+        risk    = entry_p - sl_p
+        reward  = tp_p - entry_p
+
+        box.new(bar_index, tp_p, bar_index + rr_box_width, entry_p,
+             border_color=color.new(#00E676, 0), border_width=1, bgcolor=color.new(#00E676, 85))
+        box.new(bar_index, entry_p, bar_index + rr_box_width, sl_p,
+             border_color=color.new(#FF1744, 0), border_width=1, bgcolor=color.new(#FF1744, 85))
+        line.new(bar_index, entry_p, bar_index + rr_box_width, entry_p,
+             color=color.new(color.white, 15), width=1, style=line.style_solid)
+
+        label.new(bar_index + rr_box_width, tp_p,
+             "  TP  " + str.tostring(rr_ratio) + "R  +" + str.tostring(math.round(reward, 2)),
+             color=color.new(#00E676, 0), textcolor=color.white, style=label.style_label_left, size=size.small)
+        label.new(bar_index + rr_box_width, entry_p,
+             "  ENTRY  " + str.tostring(math.round(entry_p, 2)),
+             color=color.new(#21262D, 0), textcolor=color.white, style=label.style_label_left, size=size.small)
+        label.new(bar_index + rr_box_width, sl_p,
+             "  SL  -" + str.tostring(math.round(risk, 2)),
+             color=color.new(#FF1744, 0), textcolor=color.white, style=label.style_label_left, size=size.small)
+
+    if final_bear
+        entry_p = close
+        sl_p    = high + (atr14 * atr_mult_sl)
+        tp_p    = entry_p - ((sl_p - entry_p) * rr_ratio)
+        risk    = sl_p - entry_p
+        reward  = entry_p - tp_p
+
+        box.new(bar_index, entry_p, bar_index + rr_box_width, tp_p,
+             border_color=color.new(#00E676, 0), border_width=1, bgcolor=color.new(#00E676, 85))
+        box.new(bar_index, sl_p, bar_index + rr_box_width, entry_p,
+             border_color=color.new(#FF1744, 0), border_width=1, bgcolor=color.new(#FF1744, 85))
+        line.new(bar_index, entry_p, bar_index + rr_box_width, entry_p,
+             color=color.new(color.white, 15), width=1, style=line.style_solid)
+
+        label.new(bar_index + rr_box_width, sl_p,
+             "  SL  +" + str.tostring(math.round(risk, 2)),
+             color=color.new(#FF1744, 0), textcolor=color.white, style=label.style_label_left, size=size.small)
+        label.new(bar_index + rr_box_width, entry_p,
+             "  ENTRY  " + str.tostring(math.round(entry_p, 2)),
+             color=color.new(#21262D, 0), textcolor=color.white, style=label.style_label_left, size=size.small)
+        label.new(bar_index + rr_box_width, tp_p,
+             "  TP  " + str.tostring(rr_ratio) + "R  -" + str.tostring(math.round(reward, 2)),
+             color=color.new(#00E676, 0), textcolor=color.white, style=label.style_label_left, size=size.small)
+
+// ─────────────────────────────────────────────
+// SIGNAL ARROW LABELS
+// ─────────────────────────────────────────────
+lbl_size    = f_label_size(sig_label_size)
+session_tag = in_london ? " [LON]" : in_ny ? " [NY]" : in_asia ? " [ASIA]" : ""
+htf_score   = htf_bull_score > htf_bear_score ? htf_bull_score : htf_bear_score
+
+if final_bull
+    label.new(bar_index, low - atr14 * 1.5,
+         "▲ BUY" + session_tag + " · 1H " + str.tostring(htf_score) + "/3\nCRT+TBS+HTF",
+         color=bull_col, textcolor=color.white, style=label.style_label_up, size=lbl_size)
+
+if final_bear
+    label.new(bar_index, high + atr14 * 1.5,
+         "▼ SELL" + session_tag + " · 1H " + str.tostring(htf_score) + "/3\nCRT+TBS+HTF",
+         color=bear_col, textcolor=color.white, style=label.style_label_down, size=lbl_size)
+
+// ─────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────
+alertcondition(final_bull,
+     title   = "CRT+TBS+1H BUY",
+     message = "🟢 HIGH PROB BUY | {{ticker}} | TF: {{interval}} | 1H aligned | Price: {{close}}")
+alertcondition(final_bear,
+     title   = "CRT+TBS+1H SELL",
+     message = "🔴 HIGH PROB SELL | {{ticker}} | TF: {{interval}} | 1H aligned | Price: {{close}}")
+alertcondition(final_bull or final_bear,
+     title   = "CRT+TBS+1H Any Signal",
+     message = "⚡ HIGH PROB SIGNAL | {{ticker}} | TF: {{interval}} | Price: {{close}}")
+
+// ─────────────────────────────────────────────
+// DASHBOARD TABLE
+// ─────────────────────────────────────────────
+var table dash = table.new(position.top_right, 2, 12,
+     bgcolor=#0D1117, border_color=color.new(#42A5F5, 40),
+     border_width=1, frame_color=color.new(#42A5F5, 20), frame_width=2)
+
+if barstate.islast
+    table.cell(dash, 0, 0, "CRT+TBS+1H HTF", text_color=#42A5F5, text_size=size.small, bgcolor=#161B22, text_halign=text.align_center)
+    table.cell(dash, 1, 0, "STATUS",          text_color=#42A5F5, text_size=size.small, bgcolor=#161B22, text_halign=text.align_center)
+
+    table.cell(dash, 0, 1, "1H EMA50",     text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 1, htf_c1_bull ? "▲ BULL" : "▼ BEAR",
+         text_color=htf_c1_bull ? #00E676 : #FF1744, text_size=size.tiny)
+
+    table.cell(dash, 0, 2, "1H EMA200",    text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 2, htf_c2_bull ? "▲ BULL" : "▼ BEAR",
+         text_color=htf_c2_bull ? #00E676 : #FF1744, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "1H Structure", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 3, htf_c3_bull ? "▲ BULL" : "▼ BEAR",
+         text_color=htf_c3_bull ? #00E676 : #FF1744, text_size=size.tiny)
+
+    table.cell(dash, 0, 4, "1H Bias",      text_color=color.silver, text_size=size.tiny, bgcolor=#0D1117)
+    table.cell(dash, 1, 4,
+         htf_bull_score >= htf_threshold ? "✅ BULL " + str.tostring(htf_bull_score) + "/3" :
+         htf_bear_score >= htf_threshold ? "✅ BEAR " + str.tostring(htf_bear_score) + "/3" : "⚠ MIXED",
+         text_color=htf_bull_score >= htf_threshold ? #00E676 : htf_bear_score >= htf_threshold ? #FF1744 : #FFA726,
+         text_size=size.tiny, bgcolor=#0D1117)
+
+    table.cell(dash, 0, 5, "Session Mode",  text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 5, trade_session,   text_color=#FFA726,       text_size=size.tiny)
+
+    table.cell(dash, 0, 6, "London",        text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 6, not use_lon ? "— OFF" : in_london ? "🟢 ACTIVE" : "⚫ WAITING",
+         text_color=in_london ? #00E676 : use_lon ? color.gray : #363A45, text_size=size.tiny)
+
+    table.cell(dash, 0, 7, "New York",      text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 7, not use_ny  ? "— OFF" : in_ny     ? "🟢 ACTIVE" : "⚫ WAITING",
+         text_color=in_ny     ? #00E676 : use_ny  ? color.gray : #363A45, text_size=size.tiny)
+
+    table.cell(dash, 0, 8, "Asia",          text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 8, not use_asi ? "— OFF" : in_asia   ? "🟢 ACTIVE" : "⚫ WAITING",
+         text_color=in_asia   ? #00E676 : use_asi ? color.gray : #363A45, text_size=size.tiny)
+
+    table.cell(dash, 0, 9, "CRT Setup",    text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 10,
+         c2_rejected_from_low ? "⬆ Bull Manip" : c2_rejected_from_high ? "⬇ Bear Manip" : "Scanning...",
+         text_color=c2_rejected_from_low ? #00E676 : c2_rejected_from_high ? #FF1744 : color.gray,
+         text_size=size.tiny)
+
+    table.cell(dash, 0, 10, "Session",      text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 10,
+         in_london ? "London" : in_ny ? "New York" : in_asia ? "Asia" : "— Off —",
+         text_color=in_session ? #FFA726 : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 11, "▶ SIGNAL",    text_color=#42A5F5, text_size=size.tiny, bgcolor=#161B22)
+    table.cell(dash, 1, 11,
+         final_bull ? "▲ BUY"  + session_tag :
+         final_bear ? "▼ SELL" + session_tag : "— Waiting —",
+         text_color=final_bull ? #00E676 : final_bear ? #FF1744 : color.gray,
+         text_size=size.small, bgcolor=#161B22)

@@ -1,0 +1,536 @@
+// ============================================================
+// CRT + TBS [Turtle Body Soup]  |  Pine Script v5
+// Candle Range Theory  +  Turtle Body Soup Entry Method
+// ============================================================
+//
+// WHAT IS CRT?  (3-candle AMD model)
+//   C1 — Accumulation  : establishes the reference range (high/low)
+//   C2 — Manipulation  : sweeps C1's high or low to grab liquidity
+//   C3 — Distribution  : reversal + close beyond the other side of C1
+//
+// WHAT IS TBS?  (Turtle Body Soup)
+//   The BODY of C2 closes BEYOND C1's high or low.
+//   This is stronger than TWS (Turtle Wick Soup) where only the wick pierces.
+//   TBS = institutional trap confirmed by candle body close → high-prob reversal.
+//
+//   TBS BULL:  C2 body closes BELOW C1 low  →  then C3 reclaims and reverses UP
+//   TBS BEAR:  C2 body closes ABOVE C1 high →  then C3 reclaims and reverses DOWN
+//
+// KILL ZONES  (ICT Session Windows)
+//   Asia:     20:00 – 23:00 ET   (sets the range / accumulation)
+//   London:   02:00 – 05:00 ET   (main manipulation + distribution)
+//   NY AM:    08:30 – 11:00 ET   (second high-prob manipulation window)
+//   NY PM:    13:00 – 16:00 ET   (London-close / NY continuation)
+//
+// SIGNAL LOGIC (all must be TRUE):
+//   ✅ CRT 3-candle pattern confirmed
+//   ✅ C2 is TBS (body close beyond C1 level, not just wick)
+//   ✅ Inside selected Kill Zone session
+//   ✅ HTF alignment (optional): 1H EMA / candle structure agrees
+// ============================================================
+
+//@version=5
+indicator("CRT + TBS [Turtle Body Soup]", shorttitle = "CRT+TBS", overlay = true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
+
+// ─────────────────────────────────────────────
+// ░░  INPUTS
+// ─────────────────────────────────────────────
+
+grp_kz    = "⏰  Kill Zone Sessions (ET / New York Time)"
+grp_crt   = "⚙️  CRT + TBS Detection"
+grp_trend = "📈  Trend Filter (Trading Style)"
+grp_htf   = "📐  HTF Alignment (1H)"
+grp_rr    = "🎯  Entry / Risk / Reward"
+grp_vis   = "🎨  Visuals"
+
+// ── Kill Zones ──────────────────────────────
+i_kzMode = input.string("London + NY AM", "Active Kill Zones", options=["Asia Only","London Only","NY AM Only","NY PM Only", "London + NY AM","London + NY PM","All Sessions"], group=grp_kz, tooltip="Signals only fire inside the selected session window(s).")
+
+i_asiaStart  = input.int(20, "Asia  Start (ET hour)", minval=0, maxval=23, group=grp_kz)
+i_asiaEnd    = input.int(23, "Asia  End   (ET hour)", minval=0, maxval=23, group=grp_kz)
+i_lonStart   = input.int(2,  "London Start (ET hour)",minval=0, maxval=23, group=grp_kz)
+i_lonEnd     = input.int(5,  "London End   (ET hour)",minval=0, maxval=23, group=grp_kz)
+i_nyAMStart  = input.int(8,  "NY AM Start  (ET hour)",minval=0, maxval=23, group=grp_kz,
+     tooltip="NY morning kill zone starts at 08:30 ET — use 8 here.")
+i_nyAMEnd    = input.int(11, "NY AM End    (ET hour)",minval=0, maxval=23, group=grp_kz)
+i_nyPMStart  = input.int(13, "NY PM Start  (ET hour)",minval=0, maxval=23, group=grp_kz)
+i_nyPMEnd    = input.int(16, "NY PM End    (ET hour)",minval=0, maxval=23, group=grp_kz)
+i_shadeSess  = input.bool(true, "Shade Session Background", group=grp_kz)
+
+// ── CRT + TBS ───────────────────────────────
+i_tbsOnly = input.bool(true, "Require TBS (body close beyond level)", group=grp_crt, tooltip="ON = Turtle BODY Soup only (body of C2 closes past C1 level) — HIGHER QUALITY\nOFF = also accept Turtle WICK Soup (wick pierces, body stays inside) — MORE SIGNALS")
+i_showC1Box  = input.bool(true,  "Show C1 Accumulation Box",              group=grp_crt)
+i_showC2Mk   = input.bool(true,  "Show C2 Manipulation Wick/Body Mark",   group=grp_crt)
+i_showDir = input.string("Both", "Signal Direction", options=["Both","Bullish Only","Bearish Only"], group=grp_crt)
+
+// ── HTF ─────────────────────────────────────
+i_useHTF     = input.bool(true,  "Enable 1H HTF Alignment Filter", group=grp_htf)
+i_htfTF      = input.timeframe("60", "HTF Timeframe", group=grp_htf)
+i_htfEmaLen  = input.int(50, "HTF EMA Length (trend bias)", minval=5, group=grp_htf,
+     tooltip="Price must be above (bull) or below (bear) this EMA on the HTF.")
+i_htfStrict  = input.bool(false, "Require BOTH HTF EMA + HTF Candle",    group=grp_htf,
+     tooltip="ON = HTF EMA bias AND last HTF candle must agree (stricter)\nOFF = HTF EMA alone is sufficient")
+i_showHTFEma = input.bool(true,  "Show HTF EMA on chart", group=grp_htf)
+
+// ── Trend Filter — Trading Style ─────────────
+i_tradingStyle = input.string("Intraday", "Trading Style", options=["Scalping","Intraday","Swing"], group=grp_trend, tooltip="Scalping  → EMA 8 / 21  (fast, 1m–5m)\nIntraday  → EMA 20 / 50  (medium, 15m–1H)\nSwing     → EMA 50 / 200 (slow, 4H–Daily)\nSignals only fire in the direction of the current trend (faster EMA above/below slower EMA).")
+i_useTrend   = input.bool(true, "Enable Trend Filter", group=grp_trend,
+     tooltip="When ON, only LONG signals are allowed when trend is UP, only SHORT when trend is DOWN.")
+i_showTrendEma = input.bool(true, "Show Trend EMAs on chart", group=grp_trend)
+i_trendEmaFast = input.int(0,  "Custom Fast EMA (0 = use Style default)", minval=0, group=grp_trend,
+     tooltip="Leave 0 to auto-select based on Trading Style. Set a custom value to override.")
+i_trendEmaSlow = input.int(0,  "Custom Slow EMA (0 = use Style default)", minval=0, group=grp_trend,
+     tooltip="Leave 0 to auto-select based on Trading Style. Set a custom value to override.")
+
+// ── Entry / RR ──────────────────────────────
+i_entryAt = input.string("C1 Mid", "Entry At", options=["C1 Mid","C3 Close","C1 Opposite Edge"], group=grp_rr, tooltip="C1 Mid = midpoint of the C1 accumulation range (recommended)\nC3 Close = signal bar close (immediate market entry)\nC1 Opposite Edge = conservative end of C1 range")
+i_slAt = input.string("C2 Extreme", "Stop-Loss At", options=["C2 Extreme","C1 Edge","ATR"], group=grp_rr, tooltip="C2 Extreme = beyond the wick that manipulated (tightest SL)\nC1 Edge = beyond the C1 range boundary (wider, safer)\nATR = ATR-based SL")
+i_slBuf      = input.float(0.05, "SL Buffer (%)", minval=0.0, step=0.05, group=grp_rr)
+i_atrSLMult  = input.float(1.0,  "ATR SL Multiplier", minval=0.1, step=0.1, group=grp_rr)
+i_tp1R       = input.float(1.5,  "TP1 R:R", minval=0.1, step=0.1, group=grp_rr)
+i_tp2R       = input.float(3.0,  "TP2 R:R", minval=0.1, step=0.1, group=grp_rr)
+i_boxBars    = input.int(30, "RR Box Width (bars)", minval=5, maxval=200, group=grp_rr)
+
+// ── Visuals ─────────────────────────────────
+i_bullCol    = input.color(color.new(#00e676, 0),  "Bullish Color", group=grp_vis)
+i_bearCol    = input.color(color.new(#ff1744, 0),  "Bearish Color", group=grp_vis)
+i_c1Col      = input.color(color.new(#ffa726, 0),  "C1 Range Box Color", group=grp_vis)
+i_alpha      = input.int  (82, "Box Transparency", minval=0, maxval=99, group=grp_vis)
+i_showLabels = input.bool (true, "Show Entry/SL/TP Labels", group=grp_vis)
+i_showDash   = input.bool (true, "Show Dashboard", group=grp_vis)
+i_lblSize = input.string("small", "Label Size", options=["tiny","small","normal","large"], group=grp_vis)
+
+// ── Volume & MSS Filters ─────────────────────
+grp_vols     = "📊  Volume & Structure (Extra Confluence)"
+i_volFilter  = input.bool(true,  "Enable Volume Exhaustion (C2)", group=grp_vols,
+     tooltip="Confirms that the Manipulation candle (C2) had high volume (institutional stop run).")
+i_mssFilter = input.bool(false, "Require Market Structure Shift (MSS)", group=grp_vols, tooltip="C3 must not only close beyond C1, but also break the mini-swing high/low of the range.")
+i_volMALen   = input.int(20, "Volume MA Length", minval=5, group=grp_vols)
+
+// ─────────────────────────────────────────────
+// ░░  UTILITIES
+// ─────────────────────────────────────────────
+atr14     = ta.atr(14)
+etH       = hour(time, "America/New_York")
+f_price(p) => str.tostring(math.round(p, syminfo.mintick > 0.001 ? 2 : 5))
+f_lsize(s) =>
+    s == "tiny" ? size.tiny : s == "small" ? size.small : s == "large" ? size.large : size.normal
+
+// ─────────────────────────────────────────────
+// ░░  KILL ZONE SESSION DETECTION  (ET / NY Time)
+// ─────────────────────────────────────────────
+
+inAsia  = etH >= i_asiaStart and etH < i_asiaEnd
+inLon   = etH >= i_lonStart and etH < i_lonEnd
+inNYAM  = etH >= i_nyAMStart and etH < i_nyAMEnd
+inNYPM  = etH >= i_nyPMStart and etH < i_nyPMEnd
+
+useAsia = i_kzMode == "Asia Only" or i_kzMode == "All Sessions"
+useLon  = str.contains(i_kzMode, "London") or i_kzMode == "All Sessions"
+useNYAM = str.contains(i_kzMode, "NY AM") or i_kzMode == "All Sessions"
+useNYPM = str.contains(i_kzMode, "NY PM") or i_kzMode == "All Sessions"
+
+// Re-implement with clean logic
+useAsia2 = i_kzMode == "Asia Only" or i_kzMode == "All Sessions"
+useLon2  = i_kzMode == "London Only" or i_kzMode == "London + NY AM" or i_kzMode == "London + NY PM" or i_kzMode == "All Sessions"
+useNYAM2 = i_kzMode == "NY AM Only" or i_kzMode == "London + NY AM" or i_kzMode == "All Sessions"
+useNYPM2 = i_kzMode == "NY PM Only" or i_kzMode == "London + NY PM" or i_kzMode == "All Sessions"
+
+activeAsia = useAsia2 and inAsia
+activeLon  = useLon2  and inLon
+activeNYAM = useNYAM2 and inNYAM
+activeNYPM = useNYPM2 and inNYPM
+inKZ = activeAsia or activeLon or activeNYAM or activeNYPM
+
+// Session background  (bgcolor must be global scope in Pine Script v5)
+bgcolor(i_shadeSess and activeLon  ? color.new(#1565c0, 91) : na, title="London BG")
+bgcolor(i_shadeSess and activeNYAM ? color.new(#1b5e20, 91) : na, title="NY AM BG")
+bgcolor(i_shadeSess and activeNYPM ? color.new(#0d47a1, 91) : na, title="NY PM BG")
+bgcolor(i_shadeSess and activeAsia ? color.new(#4a148c, 91) : na, title="Asia BG")
+
+// Session name tag
+kzTag = activeLon ? "[LON]" : activeNYAM ? "[NY AM]" : activeNYPM ? "[NY PM]" : activeAsia ? "[ASIA]" : ""
+
+// Kill zone open marker
+kzName = activeLon ? "LONDON KZ" : activeNYAM ? "NY AM KZ" : activeNYPM ? "NY PM KZ" : activeAsia ? "ASIA KZ" : ""
+var string prevKZ = ""
+if inKZ and kzName != prevKZ
+    label.new(bar_index, high, kzName, style=label.style_label_down, color=color.new(#263238, 25), textcolor=color.white, size=size.tiny)
+    prevKZ := kzName
+if not inKZ
+    prevKZ := ""
+
+// ─────────────────────────────────────────────
+// ░░  HTF ALIGNMENT  (1H EMA + structure)
+// ─────────────────────────────────────────────
+
+htfEma  = request.security(syminfo.tickerid, i_htfTF, ta.ema(close, i_htfEmaLen), lookahead=barmerge.lookahead_off)
+htfClose = request.security(syminfo.tickerid, i_htfTF, close[1], lookahead=barmerge.lookahead_off)
+htfOpen  = request.security(syminfo.tickerid, i_htfTF, open[1],  lookahead=barmerge.lookahead_off)
+
+htfEmaBull   = close > htfEma
+htfEmaBear   = close < htfEma
+htfCandleBull = htfClose > htfOpen   // last HTF candle was bullish
+htfCandleBear = htfClose < htfOpen   // last HTF candle was bearish
+
+// Alignment gate
+htfBullOK = not i_useHTF or (i_htfStrict ? (htfEmaBull and htfCandleBull) : htfEmaBull)
+htfBearOK = not i_useHTF or (i_htfStrict ? (htfEmaBear and htfCandleBear) : htfEmaBear)
+
+// Plot HTF EMA
+plot(i_showHTFEma ? htfEma : na, "HTF EMA", color=htfEmaBull ? color.new(#00bcd4, 40) : color.new(#ff9800, 40), linewidth=2)
+
+// ─────────────────────────────────────────────
+// ░░  TREND FILTER  —  follows trading style
+// ─────────────────────────────────────────────
+// EMA pairs auto-selected by Trading Style:
+//   Scalping  →  EMA 8  / EMA 21   (1m–5m charts)
+//   Intraday  →  EMA 20 / EMA 50   (15m–1H charts)
+//   Swing     →  EMA 50 / EMA 200  (4H–Daily charts)
+// Override with custom values in inputs.
+
+// Resolve EMA lengths from style or custom override
+styleDefault_fast = i_tradingStyle == "Scalping" ? 8  :
+                    i_tradingStyle == "Swing"    ? 50 : 20
+styleDefault_slow = i_tradingStyle == "Scalping" ? 21  :
+                    i_tradingStyle == "Swing"    ? 200 : 50
+
+trendFastLen = i_trendEmaFast > 0 ? i_trendEmaFast : styleDefault_fast
+trendSlowLen = i_trendEmaSlow > 0 ? i_trendEmaSlow : styleDefault_slow
+
+trendEmaFast = ta.ema(close, trendFastLen)
+trendEmaSlow = ta.ema(close, trendSlowLen)
+
+// Trend direction
+trendUp   = trendEmaFast > trendEmaSlow   // fast above slow → bullish trend
+trendDown = trendEmaFast < trendEmaSlow   // fast below slow → bearish trend
+
+// Trend strength: slope of fast EMA (positive = rising, negative = falling)
+trendSlope = trendEmaFast - trendEmaFast[3]
+trendStrengthLbl = math.abs(trendSlope) > atr14 * 0.1 ? (trendUp ? "Strong ▲" : "Strong ▼") : (trendUp ? "Weak ▲" : "Weak ▼")
+
+trendDirLbl = trendUp ? "▲ UP (" + str.tostring(trendFastLen) + ">" + str.tostring(trendSlowLen) + ")" : trendDown ? "▼ DOWN (" + str.tostring(trendFastLen) + "<" + str.tostring(trendSlowLen) + ")" : "Ranging"
+trendDirBgc = trendUp ? color.new(#00e676, 30) : trendDown ? color.new(#ff1744, 30) : color.new(color.gray, 40)
+
+// Gate: only trade in trend direction
+trendBullOK = not i_useTrend or trendUp
+trendBearOK = not i_useTrend or trendDown
+
+// Plot trend EMAs on chart
+plot(i_showTrendEma ? trendEmaFast : na, "Trend EMA Fast (" + str.tostring(trendFastLen) + ")", color=trendUp ? color.new(#00e676, 30) : color.new(#ff1744, 30), linewidth=1)
+plot(i_showTrendEma ? trendEmaSlow : na, "Trend EMA Slow (" + str.tostring(trendSlowLen) + ")", color=trendUp ? color.new(#00e676, 55) : color.new(#ff1744, 55), linewidth=2)
+
+// Momentum bar coloring — bars adopt trend color inside kill zones
+barcolor(i_useTrend and inKZ and trendUp   ? color.new(#00e676, 60) :
+         i_useTrend and inKZ and trendDown ? color.new(#ff1744, 60) : na,
+         title="Trend Momentum Bar Color")
+
+// Trend Cloud
+tPlot1 = plot(i_showTrendEma ? trendEmaFast : na, color=na)
+tPlot2 = plot(i_showTrendEma ? trendEmaSlow : na, color=na)
+fill(tPlot1, tPlot2, color = trendUp ? color.new(i_bullCol, 88) : trendDown ? color.new(i_bearCol, 88) : na, title = "Trend Cloud")
+
+// ─────────────────────────────────────────────
+// ░░  CRT  3-CANDLE AMD PATTERN
+// ─────────────────────────────────────────────
+// Candles:
+//   C1 = bar_index[-2]  →  Accumulation
+//   C2 = bar_index[-1]  →  Manipulation (liquidity grab)
+//   C3 = bar_index[0]   →  Distribution (signal bar, close confirms reversal)
+
+c1Hi   = high[2]
+c1Lo   = low[2]
+c1Mid  = (c1Hi + c1Lo) / 2
+
+c2Hi   = high[1]
+c2Lo   = low[1]
+c2Cls  = close[1]
+c2Opn  = open[1]
+c2Body_top = math.max(c2Cls, c2Opn)
+c2Body_bot = math.min(c2Cls, c2Opn)
+
+// ── Manipulation detection ──
+c2WickAbove = c2Hi  > c1Hi
+c2WickBelow = c2Lo  < c1Lo
+c2BodyAbove = c2Body_top > c1Hi
+c2BodyBelow = c2Body_bot < c1Lo
+
+// Apply TBS filter
+bullManip = i_tbsOnly ? c2BodyBelow : c2WickBelow
+bearManip = i_tbsOnly ? c2BodyAbove : c2WickAbove
+
+// ── C3 Distribution ──
+c3BullConfirm = close > c1Hi
+c3BearConfirm = close < c1Lo
+
+// ── Raw CRT signals ──
+crtBull = bullManip and c3BullConfirm
+crtBear = bearManip and c3BearConfirm
+
+// ─────────────────────────────────────────────
+// ░░  VOLUME & STRUCTURE LOGIC
+// ─────────────────────────────────────────────
+volMA = ta.sma(volume, i_volMALen)
+// Volume Exhaustion: C2 volume should be higher than C1 and C3 should have healthy volume
+volExhaustion = volume[1] > volMA[1] or volume[1] > volume[2]
+volConfirm    = not i_volFilter or volExhaustion
+
+// Market Structure Shift (MSS) for C3
+// Bull MSS: Close > highest of C1 and C2
+// Bear MSS: Close < lowest of C1 and C2
+mssBull = close > math.max(c1Hi, c2Hi)
+mssBear = close < math.min(c1Lo, c2Lo)
+mssOK   = not i_mssFilter or (crtBull ? mssBull : crtBear ? mssBear : false)
+
+// ─────────────────────────────────────────────
+// ░░  FINAL SIGNAL
+// ─────────────────────────────────────────────
+
+bullSigSource = crtBull and inKZ and htfBullOK and trendBullOK and volConfirm and mssOK
+bullSig = bullSigSource and (i_showDir == "Both" or i_showDir == "Bullish Only")
+
+bearSigSource = crtBear and inKZ and htfBearOK and trendBearOK and volConfirm and mssOK
+bearSig = bearSigSource and (i_showDir == "Both" or i_showDir == "Bearish Only")
+
+// ─────────────────────────────────────────────
+// ░░  ENTRY / SL / TP LEVELS
+// ─────────────────────────────────────────────
+
+// ── BULL levels ──
+bullEntry = i_entryAt == "C1 Mid"           ? c1Mid
+          : i_entryAt == "C1 Opposite Edge" ? c1Hi
+          : close   // C3 Close
+
+bullSL = i_slAt == "C2 Extreme"  ? c2Lo  * (1 - i_slBuf / 100)
+       : i_slAt == "C1 Edge"     ? c1Lo  * (1 - i_slBuf / 100)
+       : close - atr14 * i_atrSLMult
+
+bullRisk = math.max(math.abs(bullEntry - bullSL), syminfo.mintick)
+bullTP1  = bullEntry + bullRisk * i_tp1R
+bullTP2  = bullEntry + bullRisk * i_tp2R
+
+// ── BEAR levels ──
+bearEntry = i_entryAt == "C1 Mid"           ? c1Mid
+          : i_entryAt == "C1 Opposite Edge" ? c1Lo
+          : close
+
+bearSL = i_slAt == "C2 Extreme"  ? c2Hi  * (1 + i_slBuf / 100)
+       : i_slAt == "C1 Edge"     ? c1Hi  * (1 + i_slBuf / 100)
+       : close + atr14 * i_atrSLMult
+
+bearRisk = math.max(math.abs(bearSL - bearEntry), syminfo.mintick)
+bearTP1  = bearEntry - bearRisk * i_tp1R
+bearTP2  = bearEntry - bearRisk * i_tp2R
+
+// ─────────────────────────────────────────────
+// ░░  SIGNAL ARROWS  (above/below bar)
+// ─────────────────────────────────────────────
+
+plotshape(bullSig, title="CRT+TBS Bull", location=location.belowbar, style=shape.triangleup, color=i_bullCol, size=size.large)
+
+plotshape(bearSig, title="CRT+TBS Bear", location=location.abovebar, style=shape.triangledown, color=i_bearCol, size=size.large)
+
+// ── Entry price dot AT exact price ──
+plotshape(bullSig ? bullEntry : na, title="Bull Entry Dot", location=location.absolute, style=shape.circle, color=color.white, size=size.small)
+plotshape(bearSig ? bearEntry : na, title="Bear Entry Dot", location=location.absolute, style=shape.circle, color=color.white, size=size.small)
+
+// ── R:R level dots (plot at exact price) ──
+plot(bullSig ? bullSL  : na, "Bull SL",  style=plot.style_circles, color=i_bearCol, linewidth=5)
+plot(bullSig ? bullTP1 : na, "Bull TP1", style=plot.style_circles, color=i_bullCol, linewidth=5)
+plot(bullSig ? bullTP2 : na, "Bull TP2", style=plot.style_circles, color=color.new(i_bullCol,35), linewidth=4)
+plot(bearSig ? bearSL  : na, "Bear SL",  style=plot.style_circles, color=i_bearCol, linewidth=5)
+plot(bearSig ? bearTP1 : na, "Bear TP1", style=plot.style_circles, color=i_bullCol, linewidth=5)
+plot(bearSig ? bearTP2 : na, "Bear TP2", style=plot.style_circles, color=color.new(i_bullCol,35), linewidth=4)
+
+// ─────────────────────────────────────────────
+// ░░  DRAW BOXES + ENTRY LINE + LABELS
+// ─────────────────────────────────────────────
+
+var string lastSig  = "—"
+var int    sigCount = 0
+
+// ── BULLISH ──────────────────────────────────
+if bullSig
+    sigCount += 1
+    lastSig  := "Bullish"
+    B = bar_index
+    R = B + i_boxBars
+    rPts = math.round(bullRisk, syminfo.mintick > 0.001 ? 2 : 5)
+
+    // C1 accumulation range box
+    if i_showC1Box
+        box.new(B - 2, c1Hi, R, c1Lo, border_color=color.new(i_c1Col, 30), bgcolor=color.new(i_c1Col, 85), border_width=1)
+
+    // C2 manipulation marker (body or wick that swept below)
+    if i_showC2Mk
+        mLvl = i_tbsOnly ? c2Body_bot : c2Lo
+        line.new(B - 1, mLvl, B + 1, mLvl, color=color.new(i_bullCol, 20), width=2, style=line.style_dotted)
+        label.new(B - 1, mLvl, i_tbsOnly ? "TBS" : "TWS", style=label.style_label_right, color=color.new(i_bullCol, 30), textcolor=color.white, size=size.tiny)
+
+    // SL zone (below entry)
+    box.new(B, bullEntry, R, bullSL, border_color=color.new(i_bearCol, 30), bgcolor=color.new(i_bearCol, i_alpha))
+
+    // TP1 zone
+    box.new(B, bullTP1, R, bullEntry, border_color=color.new(i_bullCol, 30), bgcolor=color.new(i_bullCol, i_alpha))
+
+    // TP2 zone
+    box.new(B, bullTP2, R, bullTP1, border_color=color.new(i_bullCol, 55), bgcolor=color.new(i_bullCol, math.min(i_alpha + 10, 99)))
+
+    // ENTRY LINE — thick white, most prominent
+    line.new(B, bullEntry, R, bullEntry, color=color.white, width=3, style=line.style_solid)
+
+    // Entry label ON the line
+    label.new(B, bullEntry, "🎯 BUY @ " + f_price(bullEntry) + kzTag, xloc=xloc.bar_index, style=label.style_label_right, color=i_bullCol, textcolor=color.white, size=f_lsize(i_lblSize))
+
+    // SL line + label
+    line.new(B, bullSL, R, bullSL, color=i_bearCol, width=2, style=line.style_solid)
+    if i_showLabels
+        label.new(B, bullSL, "✕ SL @ " + f_price(bullSL), xloc=xloc.bar_index, style=label.style_label_right, color=color.new(i_bearCol, 20), textcolor=color.white, size=size.small)
+
+    // TP1 line + label
+    line.new(B, bullTP1, R, bullTP1, color=i_bullCol, width=2, style=line.style_solid)
+    if i_showLabels
+        label.new(B, bullTP1, "✔ TP1 " + str.tostring(i_tp1R) + "R  @ " + f_price(bullTP1), xloc=xloc.bar_index, style=label.style_label_right, color=color.new(i_bullCol, 20), textcolor=color.white, size=size.small)
+
+    // TP2 line + label
+    line.new(B, bullTP2, R, bullTP2, color=color.new(i_bullCol, 30), width=1, style=line.style_dashed)
+    if i_showLabels
+        label.new(B, bullTP2, "✔ TP2 " + str.tostring(i_tp2R) + "R  @ " + f_price(bullTP2), xloc=xloc.bar_index, style=label.style_label_right, color=color.new(i_bullCol, 45), textcolor=color.white, size=size.small)
+
+    // Risk summary label on right
+    if i_showLabels
+        label.new(R, (bullTP1 + bullEntry) / 2, "LONG  |  Risk: " + str.tostring(rPts) + "  |  R:" + str.tostring(i_tp1R) + " / " + str.tostring(i_tp2R), xloc=xloc.bar_index, style=label.style_label_left, color=color.new(i_bullCol, 25), textcolor=color.white, size=size.small)
+
+// ── BEARISH ──────────────────────────────────
+if bearSig
+    sigCount += 1
+    lastSig  := "Bearish"
+    B = bar_index
+    R = B + i_boxBars
+    rPts = math.round(bearRisk, syminfo.mintick > 0.001 ? 2 : 5)
+
+    // C1 accumulation range box
+    if i_showC1Box
+        box.new(B - 2, c1Hi, R, c1Lo, border_color=color.new(i_c1Col, 30), bgcolor=color.new(i_c1Col, 85), border_width=1)
+
+    // C2 manipulation marker
+    if i_showC2Mk
+        mLvl = i_tbsOnly ? c2Body_top : c2Hi
+        line.new(B - 1, mLvl, B + 1, mLvl, color=color.new(i_bearCol, 20), width=2, style=line.style_dotted)
+        label.new(B - 1, mLvl, i_tbsOnly ? "TBS" : "TWS", style=label.style_label_right, color=color.new(i_bearCol, 30), textcolor=color.white, size=size.tiny)
+
+    // SL zone (above entry)
+    box.new(B, bearSL, R, bearEntry, border_color=color.new(i_bearCol, 30), bgcolor=color.new(i_bearCol, i_alpha))
+
+    // TP1 zone
+    box.new(B, bearEntry, R, bearTP1, border_color=color.new(i_bullCol, 30), bgcolor=color.new(i_bullCol, i_alpha))
+
+    // TP2 zone
+    box.new(B, bearTP1, R, bearTP2, border_color=color.new(i_bullCol, 55), bgcolor=color.new(i_bullCol, math.min(i_alpha + 10, 99)))
+
+    // ENTRY LINE — thick white
+    line.new(B, bearEntry, R, bearEntry, color=color.white, width=3, style=line.style_solid)
+
+    // Entry label ON the line
+    label.new(B, bearEntry, "🎯 SELL @ " + f_price(bearEntry) + kzTag, xloc=xloc.bar_index, style=label.style_label_right, color=i_bearCol, textcolor=color.white, size=f_lsize(i_lblSize))
+
+    // SL line + label
+    line.new(B, bearSL, R, bearSL, color=i_bearCol, width=2, style=line.style_solid)
+    if i_showLabels
+        label.new(B, bearSL, "✕ SL @ " + f_price(bearSL), xloc=xloc.bar_index, style=label.style_label_right, color=color.new(i_bearCol, 20), textcolor=color.white, size=size.small)
+
+    // TP1 line + label
+    line.new(B, bearTP1, R, bearTP1, color=i_bullCol, width=2, style=line.style_solid)
+    if i_showLabels
+        label.new(B, bearTP1, "✔ TP1 " + str.tostring(i_tp1R) + "R  @ " + f_price(bearTP1), xloc=xloc.bar_index, style=label.style_label_right, color=color.new(i_bullCol, 20), textcolor=color.white, size=size.small)
+
+    // TP2 line + label
+    line.new(B, bearTP2, R, bearTP2, color=color.new(i_bullCol, 30), width=1, style=line.style_dashed)
+    if i_showLabels
+        label.new(B, bearTP2, "✔ TP2 " + str.tostring(i_tp2R) + "R  @ " + f_price(bearTP2), xloc=xloc.bar_index, style=label.style_label_right, color=color.new(i_bullCol, 45), textcolor=color.white, size=size.small)
+
+    // Risk summary label on right
+    if i_showLabels
+        label.new(R, (bearEntry + bearTP1) / 2, "SHORT  |  Risk: " + str.tostring(rPts) + "  |  R:" + str.tostring(i_tp1R) + " / " + str.tostring(i_tp2R), xloc=xloc.bar_index, style=label.style_label_left, color=color.new(i_bearCol, 25), textcolor=color.white, size=size.small)
+
+// ─────────────────────────────────────────────
+// ░░  DASHBOARD
+// ─────────────────────────────────────────────
+
+var table dash = table.new(position.top_right, 2, 15, border_width=1, border_color=color.new(color.gray, 50), bgcolor=color.new(#0d1117, 8))
+
+if i_showDash and barstate.islast
+    hCol = color.new(#1565c0, 15)
+    table.cell(dash, 0, 0, "CRT + TBS", text_color=color.white, bgcolor=hCol, text_size=size.normal, text_halign=text.align_center)
+    table.cell(dash, 1, 0, "Turtle Body Soup", text_color=color.white, bgcolor=hCol, text_size=size.normal, text_halign=text.align_center)
+
+    // Kill Zone
+    kzLbl = inKZ ? kzTag + " ACTIVE" : "No Kill Zone"
+    kzCol = inKZ ? color.new(#ffa726, 20) : color.new(color.gray, 55)
+    table.cell(dash, 0, 1, "Session", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 1, kzLbl,    text_color=color.white, bgcolor=kzCol)
+
+    // ET Hour
+    table.cell(dash, 0, 2, "ET Hour", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 2, str.tostring(etH) + ":xx ET",
+         text_color=color.white, bgcolor=color.new(color.gray, 50))
+
+    // CRT pattern
+    crtLbl = crtBull ? "⬆ Bull CRT" : crtBear ? "⬇ Bear CRT" : "Scanning..."
+    crtBgc = crtBull ? color.new(#00e676, 35) : crtBear ? color.new(#ff1744, 35) : color.new(color.gray, 55)
+    table.cell(dash, 0, 3, "CRT Pattern", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 3, crtLbl,        text_color=color.white, bgcolor=crtBgc)
+
+    // TBS confirmation
+    tbsBull = c2BodyBelow
+    tbsBear = c2BodyAbove
+    tbsLbl  = tbsBull ? "⬆ Bull TBS (body)" : tbsBear ? "⬇ Bear TBS (body)" : "No TBS"
+    tbsBgc  = tbsBull ? color.new(#00e676, 35) : tbsBear ? color.new(#ff1744, 35) : color.new(color.gray, 55)
+    table.cell(dash, 0, 4, "TBS (body close)",  text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 4, tbsLbl,              text_color=color.white, bgcolor=tbsBgc)
+
+    // C2 wick sweep
+    wkLbl = c2WickBelow ? "↓ Wick below C1" : c2WickAbove ? "↑ Wick above C1" : "No sweep"
+    wkBgc = c2WickBelow ? color.new(#00e676, 50) : c2WickAbove ? color.new(#ff1744, 50) : color.new(color.gray, 55)
+    table.cell(dash, 0, 5, "C2 Wick Sweep",  text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 5, wkLbl,            text_color=color.white, bgcolor=wkBgc)
+
+    // HTF
+    htfLbl = htfEmaBull ? "▲ Bull (above EMA)" : htfEmaBear ? "▼ Bear (below EMA)" : "Neutral"
+    htfBgc = htfEmaBull ? color.new(#00e676, 35) : htfEmaBear ? color.new(#ff1744, 35) : color.new(color.gray, 35)
+    table.cell(dash, 0, 6, "HTF Bias", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 6, htfLbl,     text_color=color.white, bgcolor=htfBgc)
+
+    // HTF Candle structure
+    hcLbl = htfCandleBull ? "▲ Last 1H Bullish" : htfCandleBear ? "▼ Last 1H Bearish" : "Doji"
+    hcBgc = htfCandleBull ? color.new(#00e676, 45) : htfCandleBear ? color.new(#ff1744, 45) : color.new(color.gray, 45)
+    table.cell(dash, 0, 7, "HTF Candle",  text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 7, hcLbl,         text_color=color.white, bgcolor=hcBgc)
+
+    // Trend style
+    table.cell(dash, 0, 8, "Trading Style",   text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 8, i_tradingStyle + (i_useTrend ? "  ON" : "  OFF"),
+         text_color=color.white, bgcolor=color.new(color.gray, 50))
+
+    // Trend direction
+    table.cell(dash, 0, 9,  "Trend",  text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 9,  trendDirLbl, text_color=color.white, bgcolor=trendDirBgc)
+
+    table.cell(dash, 0, 11, "Volume/MSS", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 11, (i_volFilter ? (volExhaustion ? "Vol ✅" : "Vol ❌") : "Vol —") + " | " + (i_mssFilter ? (mssOK ? "MSS ✅" : "MSS ❌") : "MSS —"), text_color=color.white, bgcolor=(volExhaustion or not i_volFilter) ? color.new(#00e676, 45) : color.new(#ff1744, 45))
+    table.cell(dash, 0, 12, "Entry / SL", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 12, i_entryAt + " / " + i_slAt, text_color=color.white, bgcolor=color.new(color.gray, 50))
+    sigClr = lastSig == "Bullish" ? color.new(#00e676, 25) : lastSig == "Bearish" ? color.new(#ff1744, 25) : color.new(color.gray, 50)
+    table.cell(dash, 0, 13, "Last Signal", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 13, lastSig, text_color=color.white, bgcolor=sigClr)
+    table.cell(dash, 0, 14, "Total Signals", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 14, str.tostring(sigCount), text_color=color.white, bgcolor=color.new(color.gray, 50))
+
+// ─────────────────────────────────────────────
+// ░░  ALERTS
+// ─────────────────────────────────────────────
+alertcondition(bullSig, title="CRT+TBS BUY Signal", message="🟢 CRT+TBS BUY | {{ticker}} @ {{close}} | Kill Zone + TBS body close + HTF aligned")
+alertcondition(bearSig, title="CRT+TBS SELL Signal", message="🔴 CRT+TBS SELL | {{ticker}} @ {{close}} | Kill Zone + TBS body close + HTF aligned")
+alertcondition(bullSig or bearSig, title="CRT+TBS Any Signal", message="⚡ CRT+TBS Signal | {{ticker}} @ {{close}} | Full confluence confirmed")
+alertcondition(crtBull and inKZ, title="CRT Bull (no HTF gate)", message="📊 CRT Bull pattern in Kill Zone | {{ticker}} @ {{close}}")
+alertcondition(crtBear and inKZ, title="CRT Bear (no HTF gate)", message="📊 CRT Bear pattern in Kill Zone | {{ticker}} @ {{close}}")

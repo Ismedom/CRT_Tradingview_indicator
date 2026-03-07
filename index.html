@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Indicator Hub | Premium Pine Scripts</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body class="aesthetic-mode">
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                     INDICATOR<span>HUB</span>
+                </div>
+            </div>
+            <nav class="indicator-nav">
+                <div class="nav-label">Scripts</div>
+                <ul id="indicator-list">
+                    <!-- Loaded dynamically -->
+                </ul>
+            </nav>
+        </aside>
+
+        <main class="content-area">
+            <header class="main-header">
+                <div class="header-left">
+                    <h1 id="active-indicator-name">Select a script</h1>
+                    <p id="active-indicator-id" class="subtitle">Pick an indicator from the sidebar to view code</p>
+                </div>
+                <div class="header-right">
+                    <button id="copy-btn" class="btn btn-primary">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        Copy Code
+                    </button>
+                    <button id="run-btn" class="btn btn-secondary">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                        Run in TV
+                    </button>
+                </div>
+            </header>
+
+            <section class="code-section">
+                <div class="code-container">
+                    <div class="code-header">
+                        <div class="dot-container">
+                            <span class="dot dot-red"></span>
+                            <span class="dot dot-yellow"></span>
+                            <span class="dot dot-green"></span>
+                        </div>
+                        <span class="file-name" id="file-name-display">script.pine</span>
+                    </div>
+                    <pre><code id="code-display"># Select an indicator to see the code...</code></pre>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <div id="toast" class="toast">Copied to clipboard!</div>
+
+    <script type="module" src="main.js"></script>
+</body>
+</html>

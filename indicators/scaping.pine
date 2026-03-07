@@ -1,0 +1,702 @@
+// ============================================================
+// SCALPING STRATEGY  |  Pine Script v5
+// ICT / SMC  –  Kill Zone  →  Sweep  →  FVG + OB  →  Entry
+// Optimised for 1m / 3m / 5m charts
+// ============================================================
+//@version=5
+indicator("Scalping Strategy [KZ → Sweep → FVG + OB]",
+     shorttitle = "SCALP PRO",
+     overlay    = true,
+     max_lines_count  = 500,
+     max_boxes_count  = 500,
+     max_labels_count = 500)
+
+// ─────────────────────────────────────────────
+// ░░  INPUTS
+// ─────────────────────────────────────────────
+
+grp_kz = "═══  Kill Zones (UTC)  ═══"
+i_useLondon  = input.bool(true, "London Kill Zone",    group=grp_kz)
+i_lonStart   = input.int (6,  "London  Start (UTC h)", minval=0, maxval=23, group=grp_kz,
+     tooltip="London Open Kill Zone. Default 06:00–09:00 UTC.")
+i_lonEnd     = input.int (9,  "London  End   (UTC h)", minval=0, maxval=23, group=grp_kz)
+i_useNY      = input.bool(true, "New York Kill Zone",  group=grp_kz)
+i_nyStart    = input.int (12, "New York Start (UTC h)", minval=0, maxval=23, group=grp_kz,
+     tooltip="New York Open Kill Zone. Default 12:00–15:00 UTC.")
+i_nyEnd      = input.int (15, "New York End   (UTC h)", minval=0, maxval=23, group=grp_kz)
+i_useAsia    = input.bool(false, "Asia Kill Zone",     group=grp_kz)
+i_asiaStart  = input.int (0,  "Asia    Start (UTC h)", minval=0, maxval=23, group=grp_kz,
+     tooltip="Asia Kill Zone. Default 00:00–03:00 UTC.")
+i_asiaEnd    = input.int (3,  "Asia    End   (UTC h)", minval=0, maxval=23, group=grp_kz)
+
+grp_liq = "═══  Liquidity Sweep  ═══"
+i_pivLen   = input.int  (3,   "Pivot Length (bars each side)", minval=1, maxval=10, group=grp_liq)
+i_sweepWin = input.int  (8,   "Sweep Memory (bars)",           minval=2, maxval=30,  group=grp_liq,
+     tooltip="Bars after sweep to still look for FVG entry.")
+i_sweepBuf = input.float(0.0, "Sweep Buffer (%)",              minval=0.0, step=0.01, group=grp_liq,
+     tooltip="Min pierce beyond the pivot before it counts as a sweep.")
+i_showSwMk = input.bool(true, "Show Sweep Markers",            group=grp_liq)
+
+grp_fvg = "═══  FVG Entry  ═══"
+i_minGap   = input.float(0.03, "Min FVG Size (%)", minval=0.0, step=0.01, group=grp_fvg,
+     tooltip="Minimum gap width as % of price. Lower for tight scalping.")
+i_fvgRetrace = input.bool(true, "Require Retrace into FVG",   group=grp_fvg,
+     tooltip="Signal only when current bar retraces back into the FVG zone (tighter filter).")
+
+grp_ob = "═══  Order Block  ═══"
+i_useOB    = input.bool(true, "Require Order Block Confluence", group=grp_ob,
+     tooltip="Only signal when an Order Block aligns with the FVG zone.")
+i_obLookback = input.int(20,  "OB Lookback (bars)",            minval=5, maxval=50, group=grp_ob)
+
+grp_ema = "═══  Trend Filter  ═══"
+i_useTrend = input.bool(true, "Use EMA Trend Filter", group=grp_ema)
+i_emaFast  = input.int (8,   "Fast EMA",              minval=1,  group=grp_ema)
+i_emaSlow  = input.int (21,  "Slow EMA",              minval=2,  group=grp_ema)
+i_ema200   = input.int (200, "Bias EMA",              minval=50, group=grp_ema,
+     tooltip="Trade LONG only above this EMA, SHORT only below.")
+
+grp_rr = "═══  Risk / Reward  ═══"
+i_dir       = input.string("Both", "Direction Filter",
+     options=["Both","Long Only","Short Only"], group=grp_rr)
+i_entryMode = input.string("FVG Mid", "Entry At",
+     options=["FVG Mid","FVG Edge","Close"], group=grp_rr)
+i_slMode    = input.string("OB Edge", "Stop-Loss At",
+     options=["OB Edge","Gap Edge","Pivot","Lookback"], group=grp_rr)
+i_slLkb     = input.int  (5,   "SL Lookback (bars)", minval=1, maxval=30, group=grp_rr)
+i_slBuf     = input.float(0.1, "SL Buffer (%)",      minval=0.0, step=0.05, group=grp_rr)
+i_tp1       = input.float(1.5, "TP1 R:R",            minval=0.1, step=0.1,  group=grp_rr)
+i_tp2       = input.float(3.0, "TP2 R:R",            minval=0.1, step=0.1,  group=grp_rr)
+
+grp_vis = "═══  Visuals  ═══"
+i_extBars   = input.int  (50,  "Box Extend Right (bars)", minval=5, maxval=500, group=grp_vis)
+i_bullCol   = input.color(color.new(#00e676, 0),  "Bullish Color", group=grp_vis)
+i_bearCol   = input.color(color.new(#ff1744, 0),  "Bearish Color", group=grp_vis)
+i_obCol     = input.color(color.new(#ff9800, 0),  "OB Color",      group=grp_vis)
+i_alpha     = input.int  (80,  "Box Transparency",        minval=0, maxval=99, group=grp_vis)
+i_showFVG   = input.bool (true, "Shade FVG Zone",         group=grp_vis)
+i_showOB    = input.bool (true, "Shade Order Block Zone", group=grp_vis)
+i_showLabels= input.bool (true, "Show Labels",            group=grp_vis)
+i_showDash  = input.bool (true, "Show Dashboard",         group=grp_vis)
+
+// ─────────────────────────────────────────────
+// ░░  KILL ZONE GATE
+// ─────────────────────────────────────────────
+
+utcH = hour(time, "UTC")
+
+inLondon = i_useLondon and utcH >= i_lonStart   and utcH < i_lonEnd
+inNY     = i_useNY     and utcH >= i_nyStart     and utcH < i_nyEnd
+inAsiaKZ = i_useAsia   and utcH >= i_asiaStart   and utcH < i_asiaEnd
+inKZ     = inLondon or inNY or inAsiaKZ
+
+kzCol = inLondon ? color.new(#1565c0, 91) : inNY ? color.new(#1b5e20, 91) : inAsiaKZ ? color.new(#4a148c, 91) : na
+bgcolor(inKZ ? kzCol : na, title="Kill Zone Background")
+
+// Kill zone label on first bar of each session
+kzName = inLondon ? "LONDON KZ" : inNY ? "NEW YORK KZ" : inAsiaKZ ? "ASIA KZ" : ""
+var string prevKZ = ""
+if inKZ and kzName != prevKZ
+    label.new(bar_index, high, kzName, style=label.style_label_down,
+         color=color.new(#263238, 20), textcolor=color.white, size=size.tiny)
+    prevKZ := kzName
+if not inKZ
+    prevKZ := ""
+
+// ─────────────────────────────────────────────
+// ░░  TREND / BIAS  (EMA filter)
+// ─────────────────────────────────────────────
+
+emaFast  = ta.ema(close, i_emaFast)
+emaSlow  = ta.ema(close, i_emaSlow)
+emaBias  = ta.ema(close, i_ema200)
+
+bullBias = close > emaBias
+bearBias = close < emaBias
+trendUp  = emaFast > emaSlow
+trendDn  = emaFast < emaSlow
+
+plot(emaFast, "EMA Fast", color=color.new(color.orange, 40), linewidth=1)
+plot(emaSlow, "EMA Slow", color=color.new(color.blue,   40), linewidth=1)
+plot(emaBias, "EMA Bias", color=color.new(color.white,  60), linewidth=2)
+
+// ─────────────────────────────────────────────
+// ░░  LIQUIDITY SWEEP DETECTION
+// ─────────────────────────────────────────────
+
+pivH = ta.pivothigh(high, i_pivLen, i_pivLen)
+pivL = ta.pivotlow (low,  i_pivLen, i_pivLen)
+
+var float rPivH = na
+var float rPivL = na
+if not na(pivH)
+    rPivH := pivH
+if not na(pivL)
+    rPivL := pivL
+
+bullSwNow = inKZ and not na(rPivL) and low  < rPivL * (1 - i_sweepBuf / 100) and close > rPivL
+bearSwNow = inKZ and not na(rPivH) and high > rPivH * (1 + i_sweepBuf / 100) and close < rPivH
+
+var int bullSwAge = 999
+var int bearSwAge = 999
+if bullSwNow
+    bullSwAge := 0
+else
+    bullSwAge := math.min(bullSwAge + 1, 999)
+if bearSwNow
+    bearSwAge := 0
+else
+    bearSwAge := math.min(bearSwAge + 1, 999)
+
+bullSwReady = bullSwAge <= i_sweepWin
+bearSwReady = bearSwAge <= i_sweepWin
+
+plotshape(i_showSwMk and bullSwNow, title="Bull Sweep",
+     style=shape.diamond, location=location.belowbar,
+     color=color.new(i_bullCol, 10), size=size.small)
+plotshape(i_showSwMk and bearSwNow, title="Bear Sweep",
+     style=shape.diamond, location=location.abovebar,
+     color=color.new(i_bearCol, 10), size=size.small)
+
+// ─────────────────────────────────────────────
+// ░░  FVG DETECTION  (3-candle imbalance)
+// ─────────────────────────────────────────────
+// Bullish FVG: price shot UP → gap between high[2] and low[0]
+// Bearish FVG: price shot DOWN → gap between low[2] and high[0]
+
+minGapSize = close * i_minGap / 100
+
+rawBullFVG = high[2] < low[0]  and (low[0]  - high[2]) >= minGapSize
+rawBearFVG = low[2]  > high[0] and (low[2]  - high[0]) >= minGapSize
+
+// Gap zone boundaries
+bFVGTop = low[0]    // top of bullish FVG
+bFVGBot = high[2]   // bot of bullish FVG
+rFVGTop = low[2]    // top of bearish FVG
+rFVGBot = high[0]   // bot of bearish FVG
+
+// Optional: require current price to retrace into FVG zone (confirmation)
+bullFVGRetrace = i_fvgRetrace ? (close <= bFVGTop and close >= bFVGBot) : true
+bearFVGRetrace = i_fvgRetrace ? (close >= rFVGBot and close <= rFVGTop) : true
+
+// ─────────────────────────────────────────────
+// ░░  ORDER BLOCK DETECTION
+// ─────────────────────────────────────────────
+// Bullish OB: last bearish candle before a significant UP move
+// Bearish OB: last bullish candle before a significant DOWN move
+
+bullOBHigh = ta.highest(high, i_obLookback)
+bullOBLow  = ta.lowest (low,  i_obLookback)
+
+// Bullish OB = last down-close candle in a swing low area
+var float bOBTop = na
+var float bOBBot = na
+var float rOBTop = na
+var float rOBBot = na
+
+// Detect bullish OB: bearish candle followed by a strong upward move
+bullOBCandle = close[1] < open[1]  // bearish bar
+bullOBImpulse = close > close[1] * 1.002  // strong follow-through up
+if bullOBCandle and bullOBImpulse
+    bOBTop := high[1]
+    bOBBot := low[1]
+
+// Detect bearish OB: bullish candle followed by a strong downward move
+bearOBCandle  = close[1] > open[1]  // bullish bar
+bearOBImpulse = close < close[1] * 0.998  // strong follow-through down
+if bearOBCandle and bearOBImpulse
+    rOBTop := high[1]
+    rOBBot := low[1]
+
+// OB confluence: price is touching / inside the OB zone
+bullOBTouch = not na(bOBTop) and close >= bOBBot and close <= bOBTop
+bearOBTouch = not na(rOBTop) and close >= rOBBot and close <= rOBTop
+
+bullOBPass = i_useOB ? bullOBTouch : true
+bearOBPass = i_useOB ? bearOBTouch : true
+
+// Draw OB boxes
+var box obBullBox = na
+var box obBearBox = na
+
+if bullOBCandle and bullOBImpulse and i_showOB
+    obBullBox := box.new(bar_index - 1, bOBTop, bar_index + i_extBars, bOBBot,
+         border_color=color.new(i_obCol, 40),
+         bgcolor=color.new(i_obCol, 88))
+
+if bearOBCandle and bearOBImpulse and i_showOB
+    obBearBox := box.new(bar_index - 1, rOBTop, bar_index + i_extBars, rOBBot,
+         border_color=color.new(i_obCol, 40),
+         bgcolor=color.new(i_obCol, 88))
+
+// ─────────────────────────────────────────────
+// ░░  FINAL SIGNAL
+// ─────────────────────────────────────────────
+// Long:  Kill Zone  +  Bull Sweep  +  Bullish FVG  +  OB  +  Trend
+// Short: Kill Zone  +  Bear Sweep  +  Bearish FVG  +  OB  +  Trend
+
+trendPassBull = i_useTrend ? (trendUp and bullBias) : true
+trendPassBear = i_useTrend ? (trendDn and bearBias) : true
+
+bullSig = rawBullFVG and bullSwReady and inKZ and bullFVGRetrace and bullOBPass and trendPassBull
+bullSig := bullSig and (i_dir == "Both" or i_dir == "Long Only")
+
+bearSig = rawBearFVG and bearSwReady and inKZ and bearFVGRetrace and bearOBPass and trendPassBear
+bearSig := bearSig and (i_dir == "Both" or i_dir == "Short Only")
+
+// ─────────────────────────────────────────────
+// ░░  ENTRY / SL / TP LEVELS
+// ─────────────────────────────────────────────
+
+// ── Long ──
+bullEntry = i_entryMode == "FVG Mid"  ? (bFVGTop + bFVGBot) / 2
+          : i_entryMode == "FVG Edge" ? bFVGBot
+          : close
+
+bullSL = i_slMode == "OB Edge"    ? (not na(bOBBot) ? bOBBot * (1 - i_slBuf / 100) : bFVGBot * (1 - i_slBuf / 100))
+       : i_slMode == "Gap Edge"   ? bFVGBot * (1 - i_slBuf / 100)
+       : i_slMode == "Pivot"      ? (not na(rPivL)  ? rPivL  * (1 - i_slBuf / 100) : bFVGBot * (1 - i_slBuf / 100))
+       : ta.lowest(low, i_slLkb)  * (1 - i_slBuf / 100)
+
+bullRisk = math.max(math.abs(bullEntry - bullSL), syminfo.mintick)
+bullTP1  = bullEntry + bullRisk * i_tp1
+bullTP2  = bullEntry + bullRisk * i_tp2
+
+// ── Short ──
+bearEntry = i_entryMode == "FVG Mid"  ? (rFVGTop + rFVGBot) / 2
+          : i_entryMode == "FVG Edge" ? rFVGTop
+          : close
+
+bearSL = i_slMode == "OB Edge"    ? (not na(rOBTop) ? rOBTop * (1 + i_slBuf / 100) : rFVGTop * (1 + i_slBuf / 100))
+       : i_slMode == "Gap Edge"   ? rFVGTop * (1 + i_slBuf / 100)
+       : i_slMode == "Pivot"      ? (not na(rPivH)  ? rPivH  * (1 + i_slBuf / 100) : rFVGTop * (1 + i_slBuf / 100))
+       : ta.highest(high, i_slLkb) * (1 + i_slBuf / 100)
+
+bearRisk = math.max(math.abs(bearSL - bearEntry), syminfo.mintick)
+bearTP1  = bearEntry - bearRisk * i_tp1
+bearTP2  = bearEntry - bearRisk * i_tp2
+
+// ─────────────────────────────────────────────
+// ░░  PLOTSHAPES — signal arrows (above/below bar)
+// ─────────────────────────────────────────────
+
+plotshape(bullSig, title="Long Signal",
+     style=shape.triangleup, location=location.belowbar,
+     color=i_bullCol, size=size.large)
+
+plotshape(bearSig, title="Short Signal",
+     style=shape.triangledown, location=location.abovebar,
+     color=i_bearCol, size=size.large)
+
+// ─────────────────────────────────────────────
+// ░░  ENTRY SHAPE  —  plotshape at exact entry price
+// ─────────────────────────────────────────────
+// plotshape with location.absolute stamps a shape
+// AT the actual price level (not above/below bar).
+
+plotshape(bullSig ? bullEntry : na,
+     title="Long Entry Marker",
+     location=location.absolute,
+     style=shape.circle,
+     color=color.white,
+     size=size.small)
+
+plotshape(bearSig ? bearEntry : na,
+     title="Short Entry Marker",
+     location=location.absolute,
+     style=shape.circle,
+     color=color.white,
+     size=size.small)
+
+// ─────────────────────────────────────────────
+// ░░  R:R SHAPE  —  plot() dots at SL / TP1 / TP2
+// ─────────────────────────────────────────────
+// plot() with style_circles draws a visible dot at
+// the exact price level on the signal bar.
+
+// ── Long R:R dots ──
+plot(bullSig ? bullSL   : na, "Long SL Dot",
+     style=plot.style_circles,
+     color=i_bearCol,
+     linewidth=5)
+plot(bullSig ? bullTP1  : na, "Long TP1 Dot",
+     style=plot.style_circles,
+     color=i_bullCol,
+     linewidth=5)
+plot(bullSig ? bullTP2  : na, "Long TP2 Dot",
+     style=plot.style_circles,
+     color=color.new(i_bullCol, 35),
+     linewidth=4)
+plot(bullSig ? bullEntry : na, "Long Entry Dot",
+     style=plot.style_circles,
+     color=color.white,
+     linewidth=6)
+
+// ── Short R:R dots ──
+plot(bearSig ? bearSL   : na, "Short SL Dot",
+     style=plot.style_circles,
+     color=i_bearCol,
+     linewidth=5)
+plot(bearSig ? bearTP1  : na, "Short TP1 Dot",
+     style=plot.style_circles,
+     color=i_bullCol,
+     linewidth=5)
+plot(bearSig ? bearTP2  : na, "Short TP2 Dot",
+     style=plot.style_circles,
+     color=color.new(i_bullCol, 35),
+     linewidth=4)
+plot(bearSig ? bearEntry : na, "Short Entry Dot",
+     style=plot.style_circles,
+     color=color.white,
+     linewidth=6)
+
+// ── Connecting lines: Entry → SL and Entry → TP1 on signal bar ──
+// These draw a vertical bracket on the chart at signal bar
+plot(bullSig ? bullEntry : na, "Bull Entry Line",
+     style=plot.style_linebr,
+     color=color.new(color.white, 50),
+     linewidth=1)
+plot(bearSig ? bearEntry : na, "Bear Entry Line",
+     style=plot.style_linebr,
+     color=color.new(color.white, 50),
+     linewidth=1)
+
+// ─────────────────────────────────────────────
+// ░░  DRAW  —  R:R PANEL + ENTRY SHAPE + TRADE CARD
+// ─────────────────────────────────────────────
+// Visual layers per signal:
+//  1. FVG gap zone (shaded band on chart)
+//  2. Wide R:R zone boxes (SL / TP1 / TP2) extending right
+//  3. Narrow vertical PANEL boxes on signal bar (proportional RR shape)
+//  4. Horizontal tick marks at Entry, SL, TP1, TP2
+//  5. Vertical spine line from SL → TP2
+//  6. Entry arrow label AT the entry price on signal bar
+//  7. Single combined trade-card label on the right
+
+// ── Persistent drawing objects ─────────────────
+var box   bxFVG   = na
+var box   bxSL    = na,  var box bxTP1   = na,  var box bxTP2   = na
+var box   panRisk = na,  var box panTP1  = na,   var box panTP2  = na
+var line  lnSpine = na
+var line  lnTickE = na,  var line lnTickS = na
+var line  lnTickT1= na,  var line lnTickT2= na
+var line  lnEnt   = na,  var line lnSL   = na
+var line  lnTP1   = na,  var line lnTP2  = na
+var label lbArrow = na
+var label lbCard  = na
+
+var string lastSig  = "—"
+var int    sigCount = 0
+var string lastKZ   = "—"
+
+// ── helper: format price to readable string ────
+f_price(p) => str.tostring(math.round(p, syminfo.mintick > 0.01 ? 2 : 5))
+
+// ── LONG ───────────────────────────────────────
+if bullSig
+    sigCount += 1
+    lastSig  := "Long"
+    lastKZ   := inLondon ? "London" : inNY ? "New York" : "Asia"
+    R   = bar_index + i_extBars
+    B   = bar_index          // signal bar index
+    P   = B - 1              // panel left edge (1 bar before signal, keeps it tight)
+    riskPts = math.round(bullRisk, syminfo.mintick > 0.01 ? 2 : 5)
+
+    // ① FVG zone (wide)
+    if i_showFVG
+        bxFVG := box.new(B - 2, bFVGTop, R, bFVGBot,
+             border_color=color.new(i_bullCol, 50), bgcolor=color.new(i_bullCol, 78))
+
+    // ② Wide R:R zone boxes (extends right — gives context)
+    bxSL  := box.new(B, bullEntry, R, bullSL,
+         border_color=color.new(i_bearCol, 30), bgcolor=color.new(i_bearCol, i_alpha))
+    bxTP1 := box.new(B, bullTP1,   R, bullEntry,
+         border_color=color.new(i_bullCol, 30), bgcolor=color.new(i_bullCol, i_alpha))
+    bxTP2 := box.new(B, bullTP2,   R, bullTP1,
+         border_color=color.new(i_bullCol, 55),
+         bgcolor=color.new(i_bullCol, math.min(i_alpha + 10, 99)))
+
+    // ③ Narrow PANEL boxes on signal bar (proportional RR shape — 2 bars wide)
+    panRisk := box.new(P, bullEntry, B + 1, bullSL,
+         border_color=color.new(i_bearCol, 10), bgcolor=color.new(i_bearCol, 45),
+         border_width=2)
+    panTP1  := box.new(P, bullTP1,   B + 1, bullEntry,
+         border_color=color.new(i_bullCol, 10), bgcolor=color.new(i_bullCol, 45),
+         border_width=2)
+    panTP2  := box.new(P, bullTP2,   B + 1, bullTP1,
+         border_color=color.new(i_bullCol, 30), bgcolor=color.new(i_bullCol, 62),
+         border_width=1)
+
+    // ④ Vertical spine  SL → TP2  (center of panel)
+    lnSpine := line.new(B, bullTP2, B, bullSL,
+         color=color.new(color.white, 55), width=1, style=line.style_solid)
+
+    // ⑤  ENTRY LINE — thick solid white, most prominent element on chart
+    lnEnt := line.new(B, bullEntry, R, bullEntry,
+         color=color.white, width=3, style=line.style_solid)
+
+    // Left-side label directly ON the entry line — price clearly printed
+    lbArrow := label.new(B, bullEntry,
+         "🎯 BUY @ " + f_price(bullEntry),
+         xloc      = xloc.bar_index,
+         style     = label.style_label_right,
+         color     = i_bullCol,
+         textcolor = color.white,
+         size      = size.normal)
+
+    // SL line — thick red, solid, labels on left
+    lnSL := line.new(B, bullSL, R, bullSL,
+         color=i_bearCol, width=2, style=line.style_solid)
+    lnTickS := line.new(B, bullSL, B, bullSL,    // dummy (reuse var)
+         color=na, width=1, style=line.style_solid)
+    label.new(B, bullSL,
+         "✕ SL @ " + f_price(bullSL),
+         xloc      = xloc.bar_index,
+         style     = label.style_label_right,
+         color     = color.new(i_bearCol, 20),
+         textcolor = color.white,
+         size      = size.small)
+
+    // TP1 line — solid green with label
+    lnTP1 := line.new(B, bullTP1, R, bullTP1,
+         color=i_bullCol, width=2, style=line.style_solid)
+    lnTickT1 := line.new(B, bullTP1, B, bullTP1, // dummy
+         color=na, width=1, style=line.style_solid)
+    label.new(B, bullTP1,
+         "✔ TP1 " + str.tostring(i_tp1) + "R  @ " + f_price(bullTP1),
+         xloc      = xloc.bar_index,
+         style     = label.style_label_right,
+         color     = color.new(i_bullCol, 20),
+         textcolor = color.white,
+         size      = size.small)
+
+    // TP2 line — dashed green with label
+    lnTP2 := line.new(B, bullTP2, R, bullTP2,
+         color=color.new(i_bullCol, 30), width=1, style=line.style_dashed)
+    lnTickT2 := line.new(B, bullTP2, B, bullTP2, // dummy
+         color=na, width=1, style=line.style_solid)
+    label.new(B, bullTP2,
+         "✔ TP2 " + str.tostring(i_tp2) + "R  @ " + f_price(bullTP2),
+         xloc      = xloc.bar_index,
+         style     = label.style_label_right,
+         color     = color.new(i_bullCol, 45),
+         textcolor = color.white,
+         size      = size.small)
+
+    // ⑦ Right-side trade card (risk summary)
+    if i_showLabels
+        lbCard := label.new(R, (bullTP1 + bullEntry) / 2,
+             "LONG  |  Risk: " + str.tostring(riskPts) + " pts  |  TP1: " + str.tostring(i_tp1) + "R  TP2: " + str.tostring(i_tp2) + "R",
+             xloc      = xloc.bar_index,
+             style     = label.style_label_left,
+             color     = color.new(i_bullCol, 25),
+             textcolor = color.white,
+             size      = size.small)
+
+// ── SHORT ──────────────────────────────────────
+if bearSig
+    sigCount += 1
+    lastSig  := "Short"
+    lastKZ   := inLondon ? "London" : inNY ? "New York" : "Asia"
+    R   = bar_index + i_extBars
+    B   = bar_index
+    P   = B - 1
+    riskPts = math.round(bearRisk, syminfo.mintick > 0.01 ? 2 : 5)
+
+    // ① FVG zone
+    if i_showFVG
+        bxFVG := box.new(B - 2, rFVGTop, R, rFVGBot,
+             border_color=color.new(i_bearCol, 50), bgcolor=color.new(i_bearCol, 78))
+
+    // ② Wide R:R zone boxes
+    bxSL  := box.new(B, bearSL,    R, bearEntry,
+         border_color=color.new(i_bearCol, 30), bgcolor=color.new(i_bearCol, i_alpha))
+    bxTP1 := box.new(B, bearEntry, R, bearTP1,
+         border_color=color.new(i_bullCol, 30), bgcolor=color.new(i_bullCol, i_alpha))
+    bxTP2 := box.new(B, bearTP1,   R, bearTP2,
+         border_color=color.new(i_bullCol, 55),
+         bgcolor=color.new(i_bullCol, math.min(i_alpha + 10, 99)))
+
+    // ③ Narrow PANEL boxes on signal bar
+    panRisk := box.new(P, bearSL,    B + 1, bearEntry,
+         border_color=color.new(i_bearCol, 10), bgcolor=color.new(i_bearCol, 45),
+         border_width=2)
+    panTP1  := box.new(P, bearEntry, B + 1, bearTP1,
+         border_color=color.new(i_bullCol, 10), bgcolor=color.new(i_bullCol, 45),
+         border_width=2)
+    panTP2  := box.new(P, bearTP1,   B + 1, bearTP2,
+         border_color=color.new(i_bullCol, 30), bgcolor=color.new(i_bullCol, 62),
+         border_width=1)
+
+    // ④ Vertical spine  TP2 → SL
+    lnSpine := line.new(B, bearSL, B, bearTP2,
+         color=color.new(color.white, 55), width=1, style=line.style_solid)
+
+    // ⑤  ENTRY LINE — thick solid white, most prominent element on chart
+    lnEnt := line.new(B, bearEntry, R, bearEntry,
+         color=color.white, width=3, style=line.style_solid)
+
+    // Left-side label directly ON the entry line — price clearly printed
+    lbArrow := label.new(B, bearEntry,
+         "🎯 SELL @ " + f_price(bearEntry),
+         xloc      = xloc.bar_index,
+         style     = label.style_label_right,
+         color     = i_bearCol,
+         textcolor = color.white,
+         size      = size.normal)
+
+    // SL line — thick red, solid, label on left
+    lnSL := line.new(B, bearSL, R, bearSL,
+         color=i_bearCol, width=2, style=line.style_solid)
+    lnTickS := line.new(B, bearSL, B, bearSL,
+         color=na, width=1, style=line.style_solid)
+    label.new(B, bearSL,
+         "✕ SL @ " + f_price(bearSL),
+         xloc      = xloc.bar_index,
+         style     = label.style_label_right,
+         color     = color.new(i_bearCol, 20),
+         textcolor = color.white,
+         size      = size.small)
+
+    // TP1 line — solid green with label
+    lnTP1 := line.new(B, bearTP1, R, bearTP1,
+         color=i_bullCol, width=2, style=line.style_solid)
+    lnTickT1 := line.new(B, bearTP1, B, bearTP1,
+         color=na, width=1, style=line.style_solid)
+    label.new(B, bearTP1,
+         "✔ TP1 " + str.tostring(i_tp1) + "R  @ " + f_price(bearTP1),
+         xloc      = xloc.bar_index,
+         style     = label.style_label_right,
+         color     = color.new(i_bullCol, 20),
+         textcolor = color.white,
+         size      = size.small)
+
+    // TP2 line — dashed green with label
+    lnTP2 := line.new(B, bearTP2, R, bearTP2,
+         color=color.new(i_bullCol, 30), width=1, style=line.style_dashed)
+    lnTickT2 := line.new(B, bearTP2, B, bearTP2,
+         color=na, width=1, style=line.style_solid)
+    label.new(B, bearTP2,
+         "✔ TP2 " + str.tostring(i_tp2) + "R  @ " + f_price(bearTP2),
+         xloc      = xloc.bar_index,
+         style     = label.style_label_right,
+         color     = color.new(i_bullCol, 45),
+         textcolor = color.white,
+         size      = size.small)
+
+    // ⑦ Right-side trade card (risk summary)
+    if i_showLabels
+        lbCard := label.new(R, (bearEntry + bearTP1) / 2,
+             "SHORT  |  Risk: " + str.tostring(riskPts) + " pts  |  TP1: " + str.tostring(i_tp1) + "R  TP2: " + str.tostring(i_tp2) + "R",
+             xloc      = xloc.bar_index,
+             style     = label.style_label_left,
+             color     = color.new(i_bearCol, 25),
+             textcolor = color.white,
+             size      = size.small)
+
+// ─────────────────────────────────────────────
+// ░░  MOMENTUM BAR COLORING
+// ─────────────────────────────────────────────
+// Color bars green/red based on EMA cross momentum when inside a KZ
+
+barMomBull = trendUp and inKZ and bullBias
+barMomBear = trendDn and inKZ and bearBias
+barcolor(barMomBull ? color.new(i_bullCol, 65) : barMomBear ? color.new(i_bearCol, 65) : na,
+     title="Momentum Bar Color")
+
+// ─────────────────────────────────────────────
+// ░░  DASHBOARD
+// ─────────────────────────────────────────────
+
+var table dash = table.new(position.top_right, 2, 12,
+     border_width=1,
+     border_color=color.new(color.gray, 55),
+     bgcolor=color.new(#0d1117, 10))
+
+if i_showDash and barstate.islast
+
+    // Header
+    kzActive  = inLondon ? "LONDON  KZ" : inNY ? "NEW YORK  KZ" : inAsiaKZ ? "ASIA  KZ" : "NO KILL ZONE"
+    kzHdrCol  = inLondon ? color.new(#1565c0, 15) : inNY ? color.new(#1b5e20, 15) : inAsiaKZ ? color.new(#4a148c, 15) : color.new(#37474f, 40)
+    table.cell(dash, 0, 0, "SCALP PRO",  text_color=color.white, bgcolor=kzHdrCol, text_size=size.normal, text_halign=text.align_center)
+    table.cell(dash, 1, 0, kzActive,     text_color=color.white, bgcolor=kzHdrCol, text_size=size.normal, text_halign=text.align_center)
+
+    // Kill zone clock
+    utcStr = "UTC " + str.tostring(utcH) + "h"
+    table.cell(dash, 0, 1, "UTC Clock",    text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 1, utcStr,         text_color=color.white, bgcolor=color.new(color.gray, 50))
+
+    // Sessions enabled
+    sesStr = (i_useLondon ? "LON " : "") + (i_useNY ? "NY " : "") + (i_useAsia ? "ASIA" : "")
+    table.cell(dash, 0, 2, "Sessions",     text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 2, sesStr,         text_color=color.white, bgcolor=color.new(color.gray, 55))
+
+    // Bias (EMA 200)
+    biasLbl = bullBias ? "Bullish" : bearBias ? "Bearish" : "Neutral"
+    biasCol = bullBias ? color.new(#00e676, 25) : bearBias ? color.new(#ff1744, 25) : color.new(color.gray, 25)
+    table.cell(dash, 0, 3, "Bias (EMA " + str.tostring(i_ema200) + ")", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 3,  biasLbl,      text_color=color.white, bgcolor=biasCol)
+
+    // Trend
+    trendLbl = trendUp ? "Up  (Fast>Slow)" : trendDn ? "Down (Fast<Slow)" : "Ranging"
+    trendCol = trendUp ? color.new(#00e676, 35) : trendDn ? color.new(#ff1744, 35) : color.new(color.gray, 35)
+    table.cell(dash, 0, 4, "Trend",        text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 4, trendLbl,       text_color=color.white, bgcolor=trendCol)
+
+    // Bull sweep
+    bSwL = bullSwNow ? "SWEPT  now" : bullSwReady ? "Ready  " + str.tostring(bullSwAge) + "b ago" : "Waiting"
+    bSwC = bullSwNow ? color.new(#00e676, 5)  : bullSwReady ? color.new(color.orange, 25) : color.new(color.gray, 55)
+    table.cell(dash, 0, 5, "Bull Sweep",   text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 5, bSwL,           text_color=color.white, bgcolor=bSwC)
+
+    // Bear sweep
+    rSwL = bearSwNow ? "SWEPT  now" : bearSwReady ? "Ready  " + str.tostring(bearSwAge) + "b ago" : "Waiting"
+    rSwC = bearSwNow ? color.new(#ff1744, 5) : bearSwReady ? color.new(color.orange, 25) : color.new(color.gray, 55)
+    table.cell(dash, 0, 6, "Bear Sweep",   text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 6, rSwL,           text_color=color.white, bgcolor=rSwC)
+
+    // FVG detected
+    fvgLbl = rawBullFVG ? "Bullish FVG" : rawBearFVG ? "Bearish FVG" : "None"
+    fvgCol = rawBullFVG ? color.new(#00e676, 40) : rawBearFVG ? color.new(#ff1744, 40) : color.new(color.gray, 55)
+    table.cell(dash, 0, 7, "FVG",          text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 7, fvgLbl,         text_color=color.white, bgcolor=fvgCol)
+
+    // OB confluence
+    obLbl = bullOBTouch ? "Bull OB  ✓" : bearOBTouch ? "Bear OB  ✓" : "None"
+    obCol = bullOBTouch ? color.new(#00e676, 40) : bearOBTouch ? color.new(#ff1744, 40) : color.new(color.gray, 55)
+    table.cell(dash, 0, 8, "Order Block",  text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 8, obLbl,          text_color=color.white, bgcolor=obCol)
+
+    // Last Signal
+    sigCol = lastSig == "Long" ? color.new(#00e676, 25) : lastSig == "Short" ? color.new(#ff1744, 25) : color.new(color.gray, 50)
+    table.cell(dash, 0, 9,  "Last Signal", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 9,  lastSig + (lastKZ != "—" ? "  [" + lastKZ + "]" : ""),
+         text_color=color.white, bgcolor=sigCol)
+
+    // R:R
+    table.cell(dash, 0, 10, "R:R  TP1/TP2", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 10, str.tostring(i_tp1) + "R  /  " + str.tostring(i_tp2) + "R",
+         text_color=color.white, bgcolor=color.new(color.gray, 50))
+
+    // Total signals
+    table.cell(dash, 0, 11, "Total Signals", text_color=color.white, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 11, str.tostring(sigCount),
+         text_color=color.white, bgcolor=color.new(color.gray, 50))
+
+// ─────────────────────────────────────────────
+// ░░  ALERTS
+// ─────────────────────────────────────────────
+
+alertcondition(bullSig, title="Scalp Long Signal",
+     message="SCALP LONG on {{ticker}} @ {{close}} | KZ + Sweep + FVG + OB aligned.")
+alertcondition(bearSig, title="Scalp Short Signal",
+     message="SCALP SHORT on {{ticker}} @ {{close}} | KZ + Sweep + FVG + OB aligned.")
+alertcondition(bullSig or bearSig, title="Scalp Signal (Any)",
+     message="SCALP Signal on {{ticker}} @ {{close}} | Full confluence detected.")
+alertcondition(bullSwNow, title="Bull Liquidity Sweep",
+     message="BULL SWEEP on {{ticker}} @ {{close}} | Pivot low swept, watching for FVG.")
+alertcondition(bearSwNow, title="Bear Liquidity Sweep",
+     message="BEAR SWEEP on {{ticker}} @ {{close}} | Pivot high swept, watching for FVG.")
+alertcondition(inLondon and not inLondon[1], title="London KZ Open",
+     message="LONDON KILL ZONE opened on {{ticker}}.")
+alertcondition(inNY and not inNY[1], title="New York KZ Open",
+     message="NEW YORK KILL ZONE opened on {{ticker}}.")

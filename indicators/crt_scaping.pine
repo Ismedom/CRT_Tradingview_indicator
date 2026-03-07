@@ -1,0 +1,300 @@
+//@version=5
+indicator("CRT + TBS + 15M HTF [SCALP]", shorttitle = "CRT·SCALP", overlay = true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
+
+// ─────────────────────────────────────────────
+// SCALP TIMEFRAME GUARD
+// ─────────────────────────────────────────────
+scalp_tf_ok = timeframe.in_seconds() <= 300
+var label tf_warn = na
+if barstate.islast and not scalp_tf_ok
+    label.delete(tf_warn)
+    tf_warn := label.new(bar_index, high, "⚠️ SCALP EDITION — Designed for 1M–5M only.", color=color.new(#FF6F00, 0), textcolor=color.white, style=label.style_label_down, size=size.normal)
+
+// ─────────────────────────────────────────────
+// GROUPS
+// ─────────────────────────────────────────────
+grp_htf  = "📐 15M HTF Alignment"
+grp_crt  = "⚙️ CRT Settings"
+grp_tbs  = "⏰ Kill Zones"
+grp_sig  = "🎯 Signal & RR"
+grp_filt = "🔍 Filters"
+grp_col  = "🎨 Colors"
+
+// ─────────────────────────────────────────────
+// HTF INPUTS
+// ─────────────────────────────────────────────
+use_htf_filter  = input.bool(true,  "Enable 15M HTF Filter",          group=grp_htf)
+htf_tf          = input.timeframe("15", "HTF Timeframe",               group=grp_htf)
+htf_ema_fast    = input.int(9,   "EMA Fast",  minval=3,                group=grp_htf)
+htf_ema_slow    = input.int(21,  "EMA Slow",  minval=5,                group=grp_htf)
+show_htf_emas   = input.bool(true, "Show 15M EMAs on chart",           group=grp_htf)
+htf_require_all = input.bool(false, "Strict Mode (all 3 checks)",      group=grp_htf)
+show_htf_bias   = input.bool(true, "Show 15M Bias label",              group=grp_htf)
+
+// ─────────────────────────────────────────────
+// CRT INPUTS
+// ─────────────────────────────────────────────
+show_crt_boxes   = input.bool(true, "Show CRT Range Boxes",            group=grp_crt)
+show_manip_wicks = input.bool(true, "Show Manipulation Wick Lines",    group=grp_crt)
+
+// ─────────────────────────────────────────────
+// SESSION INPUTS
+// ─────────────────────────────────────────────
+trade_session = input.string("London Open + NY Open", "Kill Zone", options=["London Open", "NY Open", "NY Midday", "Asian", "London Open + NY Open", "London Open + NY Open + NY Midday", "All Kill Zones"], group=grp_tbs)
+
+// ─────────────────────────────────────────────
+// SIGNAL INPUTS
+// ─────────────────────────────────────────────
+show_bull_sig  = input.bool(true,  "Show Bullish Signals",             group=grp_sig)
+show_bear_sig  = input.bool(true,  "Show Bearish Signals",             group=grp_sig)
+sig_label_size = input.string("small", "Label Size", options=["tiny","small","normal","large"], group=grp_sig)
+show_rr_box    = input.bool(true,  "Show RR Box",                      group=grp_sig)
+rr_ratio       = input.float(1.5,  "RR Ratio",   minval=1.0, maxval=5.0, step=0.5, group=grp_sig)
+atr_mult_sl    = input.float(0.3,  "SL ATR Mult", minval=0.1, maxval=2.0, step=0.1, group=grp_sig)
+rr_box_width   = input.int(15, "RR Box Width (bars)", minval=5, maxval=100, step=5,  group=grp_sig)
+
+// ─────────────────────────────────────────────
+// FILTER INPUTS
+// ─────────────────────────────────────────────
+use_ltf_ema     = input.bool(true,  "Current TF EMA Filter",           group=grp_filt)
+ltf_ema_len     = input.int(9,  "EMA Length", minval=3,                group=grp_filt)
+use_vol_filter  = input.bool(true,  "Volume Filter (above MA)",        group=grp_filt)
+vol_len         = input.int(20, "Volume MA Length",                    group=grp_filt)
+use_body_filter = input.bool(true,  "Min Body Filter (no doji)",       group=grp_filt)
+min_body_atr    = input.float(0.1, "Min Body as % ATR", minval=0.05, maxval=1.0, step=0.05, group=grp_filt)
+
+// ─────────────────────────────────────────────
+// COLOR INPUTS
+// ─────────────────────────────────────────────
+bull_col     = input.color(color.new(#00E676, 0),  "Bull Color",       group=grp_col)
+bear_col     = input.color(color.new(#FF1744, 0),  "Bear Color",       group=grp_col)
+box_col      = input.color(color.new(#FFA726, 15), "CRT Box Color",    group=grp_col)
+htf_bull_col = input.color(color.new(#00BCD4, 40), "HTF EMA Bull",     group=grp_col)
+htf_bear_col = input.color(color.new(#FF6F00, 40), "HTF EMA Bear",     group=grp_col)
+
+// ─────────────────────────────────────────────
+// UTILITY
+// ─────────────────────────────────────────────
+f_label_size(s) =>
+    s == "tiny" ? size.tiny : s == "small" ? size.small : s == "large" ? size.large : size.normal
+
+atr14 = ta.atr(14)
+
+// ─────────────────────────────────────────────
+// 15M HTF DATA
+// ─────────────────────────────────────────────
+htf_close = request.security(syminfo.tickerid, htf_tf, close[1], lookahead=barmerge.lookahead_off)
+htf_open  = request.security(syminfo.tickerid, htf_tf, open[1],  lookahead=barmerge.lookahead_off)
+htf_ema_f = request.security(syminfo.tickerid, htf_tf, ta.ema(close, htf_ema_fast), lookahead=barmerge.lookahead_off)
+htf_ema_s = request.security(syminfo.tickerid, htf_tf, ta.ema(close, htf_ema_slow), lookahead=barmerge.lookahead_off)
+
+htf_c1_bull = close > htf_ema_f
+htf_c1_bear = close < htf_ema_f
+htf_c2_bull = close > htf_ema_s
+htf_c2_bear = close < htf_ema_s
+htf_c3_bull = htf_close > htf_open
+htf_c3_bear = htf_close < htf_open
+
+htf_bull_score = (htf_c1_bull ? 1 : 0) + (htf_c2_bull ? 1 : 0) + (htf_c3_bull ? 1 : 0)
+htf_bear_score = (htf_c1_bear ? 1 : 0) + (htf_c2_bear ? 1 : 0) + (htf_c3_bear ? 1 : 0)
+
+htf_threshold = htf_require_all ? 3 : 2
+htf_bull_ok   = not use_htf_filter or (htf_bull_score >= htf_threshold)
+htf_bear_ok   = not use_htf_filter or (htf_bear_score >= htf_threshold)
+
+// ─────────────────────────────────────────────
+// PLOT HTF EMAs
+// ─────────────────────────────────────────────
+plot(show_htf_emas ? htf_ema_f : na, "15M EMA9", color=htf_c1_bull ? htf_bull_col : htf_bear_col, linewidth=2)
+plot(show_htf_emas ? htf_ema_s : na, "15M EMA21", color=htf_c2_bull ? color.new(#00BCD4,65) : color.new(#FF6F00,65), linewidth=1)
+
+// ─────────────────────────────────────────────
+// HTF BIAS LABEL
+// ─────────────────────────────────────────────
+htf_bias_col = htf_bull_score > htf_bear_score ? color.new(#00E676,0) :
+               htf_bear_score > htf_bull_score ? color.new(#FF1744,0) :
+               color.new(#FFA726,0)
+
+var label htf_label = na
+if show_htf_bias and barstate.islast
+    label.delete(htf_label)
+    htf_label := label.new(bar_index + 2, htf_ema_f, (htf_bull_score > htf_bear_score ? "15M ▲ BULL " : htf_bear_score > htf_bull_score ? "15M ▼ BEAR " : "15M ◆ MIXED ") + str.tostring(math.max(htf_bull_score, htf_bear_score)) + "/3" + "\nEMA9:  " + str.tostring(math.round(htf_ema_f, 5)) + "\nEMA21: " + str.tostring(math.round(htf_ema_s, 5)), color=color.new(#161B22,5), textcolor=htf_bias_col, style=label.style_label_left, size=size.small)
+
+// ─────────────────────────────────────────────
+// CURRENT TF FILTERS
+// ─────────────────────────────────────────────
+ltf_ema_val = ta.ema(close, ltf_ema_len)
+ltf_bull    = not use_ltf_ema or close > ltf_ema_val
+ltf_bear    = not use_ltf_ema or close < ltf_ema_val
+
+plot(use_ltf_ema ? ltf_ema_val : na, "TF EMA9", color=color.new(#FFEB3B,60), linewidth=1, style=plot.style_circles)
+
+vol_ma      = ta.sma(volume, vol_len)
+vol_ok      = not use_vol_filter  or volume > vol_ma
+body_ok     = not use_body_filter or math.abs(close - open) >= (atr14 * min_body_atr)
+
+// ─────────────────────────────────────────────
+// KILL ZONE DETECTION (no input.session — plain time())
+// ─────────────────────────────────────────────
+in_lon_raw = not na(time("", "0700-0800", "America/New_York"))
+in_ny_raw  = not na(time("", "0930-1030", "America/New_York"))
+in_mid_raw = not na(time("", "1300-1400", "America/New_York"))
+in_asi_raw = not na(time("", "2000-0500", "America/New_York"))
+
+use_lon = trade_session == "London Open" or
+          trade_session == "London Open + NY Open" or
+          trade_session == "London Open + NY Open + NY Midday" or
+          trade_session == "All Kill Zones"
+
+use_ny  = trade_session == "NY Open" or
+          trade_session == "London Open + NY Open" or
+          trade_session == "London Open + NY Open + NY Midday" or
+          trade_session == "All Kill Zones"
+
+use_mid = trade_session == "NY Midday" or
+          trade_session == "London Open + NY Open + NY Midday" or
+          trade_session == "All Kill Zones"
+
+use_asi = trade_session == "Asian" or
+          trade_session == "All Kill Zones"
+
+in_lon     = use_lon and in_lon_raw
+in_ny      = use_ny  and in_ny_raw
+in_mid     = use_mid and in_mid_raw
+in_asi     = use_asi and in_asi_raw
+in_session = in_lon or in_ny or in_mid or in_asi
+
+bgcolor(in_lon ? color.new(#42A5F5,91) : na, title="London Open")
+bgcolor(in_ny  ? color.new(#66BB6A,91) : na, title="NY Open")
+bgcolor(in_mid ? color.new(#EC407A,91) : na, title="NY Midday")
+bgcolor(in_asi ? color.new(#AB47BC,91) : na, title="Asian Session")
+
+// ─────────────────────────────────────────────
+// CRT PATTERN
+// ─────────────────────────────────────────────
+c1_high = high[2]
+c1_low  = low[2]
+c2_high = high[1]
+c2_low  = low[1]
+c2_close = close[1]
+c2_open  = open[1]
+
+c2_rejected_from_high = c2_high > c1_high and c2_close < c1_high
+c2_rejected_from_low  = c2_low  < c1_low  and c2_close > c1_low
+
+crt_bull = c2_rejected_from_low  and close > c1_high
+crt_bear = c2_rejected_from_high and close < c1_low
+
+// ─────────────────────────────────────────────
+// FINAL SIGNAL
+// ─────────────────────────────────────────────
+final_bull = crt_bull and in_session and htf_bull_ok and ltf_bull and vol_ok and body_ok and show_bull_sig
+final_bear = crt_bear and in_session and htf_bear_ok and ltf_bear and vol_ok and body_ok and show_bear_sig
+
+// ─────────────────────────────────────────────
+// CRT BOX
+// ─────────────────────────────────────────────
+if show_crt_boxes and (final_bull or final_bear)
+    box.new(bar_index - 2, c1_high, bar_index, c1_low, border_color=box_col, border_width=1, bgcolor=color.new(box_col,80))
+
+// ─────────────────────────────────────────────
+// MANIPULATION WICKS
+// ─────────────────────────────────────────────
+if show_manip_wicks and final_bull
+    line.new(bar_index - 1, c2_low, bar_index, c2_low, color=color.new(bull_col,30), width=2, style=line.style_dotted)
+
+if show_manip_wicks and final_bear
+    line.new(bar_index - 1, c2_high, bar_index, c2_high, color=color.new(bear_col,30), width=2, style=line.style_dotted)
+
+// ─────────────────────────────────────────────
+// RR BOX
+// ─────────────────────────────────────────────
+if show_rr_box and final_bull
+    entry_p = close
+    sl_p    = low  - atr14 * atr_mult_sl
+    tp_p    = entry_p + (entry_p - sl_p) * rr_ratio
+    risk    = entry_p - sl_p
+    reward  = tp_p    - entry_p
+    box.new(bar_index, tp_p, bar_index + rr_box_width, entry_p, border_color=color.new(#00E676,0), border_width=1, bgcolor=color.new(#00E676,85))
+    box.new(bar_index, entry_p, bar_index + rr_box_width, sl_p, border_color=color.new(#FF1744,0), border_width=1, bgcolor=color.new(#FF1744,85))
+    line.new(bar_index, entry_p, bar_index + rr_box_width, entry_p, color=color.new(color.white,15), width=1)
+    label.new(bar_index + rr_box_width, tp_p, "  TP " + str.tostring(rr_ratio) + "R  +" + str.tostring(math.round(reward,5)), color=color.new(#00E676,0), textcolor=color.white, style=label.style_label_left, size=size.small)
+    label.new(bar_index + rr_box_width, entry_p, "  ENTRY " + str.tostring(math.round(entry_p,5)), color=color.new(#21262D,0), textcolor=color.white, style=label.style_label_left, size=size.small)
+    label.new(bar_index + rr_box_width, sl_p, "  SL  -" + str.tostring(math.round(risk,5)), color=color.new(#FF1744,0), textcolor=color.white, style=label.style_label_left, size=size.small)
+
+if show_rr_box and final_bear
+    entry_p = close
+    sl_p    = high + atr14 * atr_mult_sl
+    tp_p    = entry_p - (sl_p - entry_p) * rr_ratio
+    risk    = sl_p    - entry_p
+    reward  = entry_p - tp_p
+    box.new(bar_index, entry_p, bar_index + rr_box_width, tp_p, border_color=color.new(#00E676,0), border_width=1, bgcolor=color.new(#00E676,85))
+    box.new(bar_index, sl_p, bar_index + rr_box_width, entry_p, border_color=color.new(#FF1744,0), border_width=1, bgcolor=color.new(#FF1744,85))
+    line.new(bar_index, entry_p, bar_index + rr_box_width, entry_p, color=color.new(color.white,15), width=1)
+    label.new(bar_index + rr_box_width, sl_p, "  SL  +" + str.tostring(math.round(risk,5)), color=color.new(#FF1744,0), textcolor=color.white, style=label.style_label_left, size=size.small)
+    label.new(bar_index + rr_box_width, entry_p, "  ENTRY " + str.tostring(math.round(entry_p,5)), color=color.new(#21262D,0), textcolor=color.white, style=label.style_label_left, size=size.small)
+    label.new(bar_index + rr_box_width, tp_p, "  TP " + str.tostring(rr_ratio) + "R  -" + str.tostring(math.round(reward,5)), color=color.new(#00E676,0), textcolor=color.white, style=label.style_label_left, size=size.small)
+
+// ─────────────────────────────────────────────
+// SIGNAL LABELS
+// ─────────────────────────────────────────────
+lbl_size    = f_label_size(sig_label_size)
+session_tag = in_lon ? " [LON]" : in_ny ? " [NY]" : in_mid ? " [MID]" : in_asi ? " [ASIA]" : ""
+htf_score   = htf_bull_score > htf_bear_score ? htf_bull_score : htf_bear_score
+
+if final_bull
+    label.new(bar_index, low - atr14 * 1.2, "▲ SCALP BUY" + session_tag + "  15M " + str.tostring(htf_score) + "/3", color=bull_col, textcolor=color.white, style=label.style_label_up, size=lbl_size)
+
+if final_bear
+    label.new(bar_index, high + atr14 * 1.2, "▼ SCALP SELL" + session_tag + "  15M " + str.tostring(htf_score) + "/3", color=bear_col, textcolor=color.white, style=label.style_label_down, size=lbl_size)
+
+// ─────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────
+alertcondition(final_bull, title="CRT SCALP BUY", message="🟢 SCALP BUY | {{ticker}} | {{interval}} | Price: {{close}}")
+alertcondition(final_bear, title="CRT SCALP SELL", message="🔴 SCALP SELL | {{ticker}} | {{interval}} | Price: {{close}}")
+alertcondition(final_bull or final_bear, title="CRT SCALP Signal", message="⚡ SCALP SIGNAL | {{ticker}} | {{interval}} | Price: {{close}}")
+
+// ─────────────────────────────────────────────
+// DASHBOARD
+// ─────────────────────────────────────────────
+var table dash = table.new(position.top_right, 2, 13, bgcolor=#0D1117, border_color=color.new(#42A5F5,40), border_width=1, frame_color=color.new(#42A5F5,20), frame_width=2)
+
+if barstate.islast
+    table.cell(dash, 0, 0, "CRT SCALP · 15M HTF", text_color=#42A5F5, text_size=size.small, bgcolor=#161B22, text_halign=text.align_center)
+    table.cell(dash, 1, 0, "STATUS", text_color=#42A5F5, text_size=size.small, bgcolor=#161B22, text_halign=text.align_center)
+    table.cell(dash, 0, 1, "Scalp TF", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 1, scalp_tf_ok ? "✅ 1M–5M OK" : "⚠ CHECK TF", text_color=scalp_tf_ok ? #00E676 : #FFA726, text_size=size.tiny)
+
+    table.cell(dash, 0, 2, "15M EMA9", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 2, htf_c1_bull ? "▲ BULL" : "▼ BEAR", text_color=htf_c1_bull ? #00E676 : #FF1744, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "15M EMA21", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 3, htf_c2_bull ? "▲ BULL" : "▼ BEAR", text_color=htf_c2_bull ? #00E676 : #FF1744, text_size=size.tiny)
+
+    table.cell(dash, 0, 4, "15M Structure", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 4, htf_c3_bull ? "▲ BULL" : "▼ BEAR", text_color=htf_c3_bull ? #00E676 : #FF1744, text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "15M Bias", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 5, htf_bull_score >= htf_threshold ? "✅ BULL " + str.tostring(htf_bull_score) + "/3" : htf_bear_score >= htf_threshold ? "✅ BEAR " + str.tostring(htf_bear_score) + "/3" : "⚠ MIXED", text_color=htf_bull_score >= htf_threshold ? #00E676 : htf_bear_score >= htf_threshold ? #FF1744 : #FFA726, text_size=size.tiny)
+
+    table.cell(dash, 0, 6, "Volume", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 6, not use_vol_filter ? "— OFF" : vol_ok ? "✅ ABOVE MA" : "⚫ LOW", text_color=vol_ok ? #00E676 : use_vol_filter ? #FF1744 : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 7, "Body Filter", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 7, not use_body_filter ? "— OFF" : body_ok ? "✅ OK" : "⚫ DOJI", text_color=body_ok ? #00E676 : use_body_filter ? #FF1744 : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 8, "London Open", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 8, not use_lon ? "— OFF" : in_lon ? "🟢 ACTIVE" : "⚫ WAITING", text_color=in_lon ? #00E676 : use_lon ? color.gray : #363A45, text_size=size.tiny)
+
+    table.cell(dash, 0, 9, "NY Open", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 9, not use_ny ? "— OFF" : in_ny ? "🟢 ACTIVE" : "⚫ WAITING", text_color=in_ny ? #00E676 : use_ny ? color.gray : #363A45, text_size=size.tiny)
+
+    table.cell(dash, 0, 10, "Asian", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 10, not use_asi ? "— OFF" : in_asi ? "🟢 ACTIVE" : "⚫ WAITING", text_color=in_asi ? #00E676 : use_asi ? color.gray : #363A45, text_size=size.tiny)
+
+    table.cell(dash, 0, 11, "CRT Setup", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 11, c2_rejected_from_low  ? "⬆ Bull Manip" : c2_rejected_from_high ? "⬇ Bear Manip" : "Scanning...", text_color=c2_rejected_from_low ? #00E676 : c2_rejected_from_high ? #FF1744 : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 12, "▶ SIGNAL", text_color=#42A5F5, text_size=size.tiny, bgcolor=#161B22)
+    table.cell(dash, 1, 12, final_bull ? "▲ BUY" + session_tag : final_bear ? "▼ SELL" + session_tag : "— Waiting —", text_color=final_bull ? #00E676 : final_bear ? #FF1744 : color.gray, text_size=size.small, bgcolor=#161B22)

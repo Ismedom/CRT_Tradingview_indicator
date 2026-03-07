@@ -1,0 +1,123 @@
+//@version=5
+indicator("USDJPY Asian Range Breakout", overlay=true, max_boxes_count=100, max_lines_count=100, max_labels_count=100)
+
+asiaStartHour  = input.int(0,     "Asia Start (UTC Hour)",  minval=0,   maxval=23)
+asiaEndHour    = input.int(6,     "Asia End   (UTC Hour)",  minval=0,   maxval=23)
+breakoutBuffer = input.float(3.0, "Breakout Buffer (pips)", minval=0.0, step=0.5)
+rrRatio        = input.float(2.0, "Risk:Reward Ratio",      minval=1.0, step=0.5)
+stopBuffer     = input.float(5.0, "Stop Buffer (pips)",     minval=0.0, step=0.5)
+rrBoxWidth     = input.int(30,    "RR Box Width (bars)",    minval=5, maxval=200, step=5)
+showAsiaBox    = input.bool(true,  "Show Asia Range Box")
+showLabels     = input.bool(true,  "Show Labels")
+
+pipSize = syminfo.mintick * 10
+
+var float asiaHigh     = na
+var float asiaLow      = na
+var int   asiaStartBar = na
+var int   asiaEndBar   = na
+var bool  asiaLocked   = false
+var bool  longFired    = false
+var bool  shortFired   = false
+var box   asiaBox      = na
+
+barHourUTC() => hour(time, "UTC")
+barMinUTC()  => minute(time, "UTC")
+
+isAsiaHour() =>
+    h = barHourUTC()
+    h >= asiaStartHour and h < asiaEndHour
+
+isLondonHour() =>
+    h = barHourUTC()
+    h >= 7 and h < 16
+
+isWeekday() =>
+    d = dayofweek(time, "UTC")
+    d >= 2 and d <= 6
+
+newAsiaSession = barHourUTC() == asiaStartHour and barMinUTC() == 0 and isWeekday()
+
+if newAsiaSession
+    asiaHigh     := high
+    asiaLow      := low
+    asiaStartBar := bar_index
+    asiaEndBar   := bar_index
+    asiaLocked   := false
+    longFired    := false
+    shortFired   := false
+    asiaBox      := na
+
+if isAsiaHour() and not asiaLocked
+    asiaHigh   := math.max(asiaHigh, high)
+    asiaLow    := math.min(asiaLow,  low)
+    asiaEndBar := bar_index
+
+if barHourUTC() == asiaEndHour and barMinUTC() == 0 and not asiaLocked
+    asiaLocked := true
+
+if showAsiaBox and asiaLocked and not na(asiaHigh) and not na(asiaStartBar)
+    if na(asiaBox)
+        asiaBox := box.new(asiaStartBar, asiaHigh, asiaEndBar, asiaLow, border_color=color.new(color.orange, 0), border_width=2, bgcolor=color.new(color.orange, 88))
+
+bufPips = breakoutBuffer * pipSize
+stopBuf = stopBuffer * pipSize
+
+inWindow    = isLondonHour() and asiaLocked and not na(asiaHigh) and not na(asiaLow)
+longSignal  = inWindow and not longFired  and close >  asiaHigh + bufPips and close[1] <= asiaHigh + bufPips
+shortSignal = inWindow and not shortFired and close <  asiaLow  - bufPips and close[1] >= asiaLow  - bufPips
+
+if longSignal
+    longFired := true
+if shortSignal
+    shortFired := true
+
+if longSignal
+    ep     = close
+    slDist = math.abs(ep - (asiaLow - stopBuf))
+    sl     = ep - slDist
+    tp     = ep + slDist * rrRatio
+    rw     = bar_index + rrBoxWidth
+    box.new(bar_index, tp,    rw, ep, border_color=color.new(#00E676, 0),  border_width=1, bgcolor=color.new(#00E676, 85))
+    box.new(bar_index, ep,    rw, sl, border_color=color.new(#FF1744, 0),  border_width=1, bgcolor=color.new(#FF1744, 85))
+    line.new(bar_index, ep,   rw, ep, color=color.new(color.white, 15), width=1, style=line.style_solid)
+    if showLabels
+        label.new(rw, tp, "  TP " + str.tostring(rrRatio) + "R  +" + str.tostring(math.round(tp - ep, 3)), color=color.new(#00E676, 0), textcolor=color.white, style=label.style_label_left, size=size.small)
+        label.new(rw, ep, "  ENTRY  " + str.tostring(math.round(ep, 3)), color=color.new(#21262D, 0), textcolor=color.white, style=label.style_label_left, size=size.small)
+        label.new(rw, sl, "  SL  -" + str.tostring(math.round(slDist / pipSize, 1)) + " pips", color=color.new(#FF1744, 0), textcolor=color.white, style=label.style_label_left, size=size.small)
+    alert("USDJPY BUY - Asia High breakout", alert.freq_once_per_bar)
+
+if shortSignal
+    ep     = close
+    slDist = math.abs(ep - (asiaHigh + stopBuf))
+    sl     = ep + slDist
+    tp     = ep - slDist * rrRatio
+    rw     = bar_index + rrBoxWidth
+    box.new(bar_index, ep,    rw, tp, border_color=color.new(#00E676, 0),  border_width=1, bgcolor=color.new(#00E676, 85))
+    box.new(bar_index, sl,    rw, ep, border_color=color.new(#FF1744, 0),  border_width=1, bgcolor=color.new(#FF1744, 85))
+    line.new(bar_index, ep,   rw, ep, color=color.new(color.white, 15), width=1, style=line.style_solid)
+    if showLabels
+        label.new(rw, sl, "  SL  +" + str.tostring(math.round(slDist / pipSize, 1)) + " pips", color=color.new(#FF1744, 0), textcolor=color.white, style=label.style_label_left, size=size.small)
+        label.new(rw, ep, "  ENTRY  " + str.tostring(math.round(ep, 3)), color=color.new(#21262D, 0), textcolor=color.white, style=label.style_label_left, size=size.small)
+        label.new(rw, tp, "  TP " + str.tostring(rrRatio) + "R  -" + str.tostring(math.round(slDist / pipSize * rrRatio, 1)) + " pips", color=color.new(#00E676, 0), textcolor=color.white, style=label.style_label_left, size=size.small)
+    alert("USDJPY SELL - Asia Low breakout", alert.freq_once_per_bar)
+
+plotshape(longSignal,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=color.new(#00E676, 0), size=size.normal, text="BUY")
+plotshape(shortSignal, title="SELL", style=shape.triangledown, location=location.abovebar, color=color.new(#FF1744, 0), size=size.normal, text="SELL")
+
+var table tbl = table.new(position.top_right, 2, 6, border_color=color.new(#42A5F5, 40), border_width=1, bgcolor=color.new(#0D1117, 0))
+
+if barstate.islast
+    table.cell(tbl, 0, 0, "Asian Breakout", text_color=color.new(#FF8C00, 0), text_size=size.small, bgcolor=color.new(#FF8C00, 80))
+    table.cell(tbl, 1, 0, "USDJPY",         text_color=color.new(#FF8C00, 0), text_size=size.small, bgcolor=color.new(#FF8C00, 80))
+    table.cell(tbl, 0, 1, "Asia High",       text_color=color.silver, text_size=size.tiny)
+    table.cell(tbl, 1, 1, na(asiaHigh) ? "---" : str.tostring(math.round(asiaHigh, 3)), text_color=color.new(#00E676, 0), text_size=size.tiny)
+    table.cell(tbl, 0, 2, "Asia Low",        text_color=color.silver, text_size=size.tiny)
+    table.cell(tbl, 1, 2, na(asiaLow) ? "---" : str.tostring(math.round(asiaLow, 3)),   text_color=color.new(#FF1744, 0), text_size=size.tiny)
+    table.cell(tbl, 0, 3, "Range pips",      text_color=color.silver, text_size=size.tiny)
+    rangeVal = na(asiaHigh) or na(asiaLow) ? "---" : str.tostring(math.round((asiaHigh - asiaLow) / pipSize, 1))
+    table.cell(tbl, 1, 3, rangeVal,          text_color=color.new(#FFA726, 0), text_size=size.tiny)
+    table.cell(tbl, 0, 4, "RR Ratio",        text_color=color.silver, text_size=size.tiny)
+    table.cell(tbl, 1, 4, "1:" + str.tostring(rrRatio), text_color=color.new(#42A5F5, 0), text_size=size.tiny)
+    table.cell(tbl, 0, 5, "Session",         text_color=color.silver, text_size=size.tiny)
+    table.cell(tbl, 1, 5, asiaLocked ? "London/NY" : "Asia", text_color=color.silver, text_size=size.tiny)
