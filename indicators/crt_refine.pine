@@ -1,0 +1,178 @@
+// ============================================================
+// CRT (Candle Range Theory) — Multi-Timeframe Detector
+// Pine Script v5
+//
+// CONCEPT (ICT / Smart Money):
+//   Candle 1 = Accumulation  → forms the range
+//   Candle 2 = Manipulation  → sweeps C1 high OR low, then closes back INSIDE range
+//   Candle 3 = Distribution  → target is the opposite side of C1 range
+//
+// BULLISH CRT: C2 sweeps C1 LOW, then closes ABOVE C1 low  → expect move to C1 HIGH
+// BEARISH CRT: C2 sweeps C1 HIGH, then closes BELOW C1 high → expect move to C1 LOW
+// ============================================================
+
+//@version=5
+indicator("CRT — Multi-Timeframe Detector", shorttitle="CRT MTF", overlay=true, max_lines_count=200, max_labels_count=200, max_boxes_count=200)
+
+// ─────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────
+grp_tf = "⏱  Timeframes to Scan"
+tf1_on  = input.bool(true,  "Enable TF 1",  group=grp_tf, inline="tf1")
+tf1     = input.timeframe("15", "",          group=grp_tf, inline="tf1")
+tf2_on  = input.bool(true,  "Enable TF 2",  group=grp_tf, inline="tf2")
+tf2     = input.timeframe("60", "",          group=grp_tf, inline="tf2")
+tf3_on  = input.bool(true,  "Enable TF 3",  group=grp_tf, inline="tf3")
+tf3     = input.timeframe("240", "",         group=grp_tf, inline="tf3")
+tf4_on  = input.bool(true,  "Enable TF 4",  group=grp_tf, inline="tf4")
+tf4     = input.timeframe("D", "",           group=grp_tf, inline="tf4")
+
+grp_vis = "🎨  Visuals"
+show_range_box  = input.bool(true,  "Draw C1 Range Box",          group=grp_vis)
+show_eq_line    = input.bool(true,  "Draw 50% EQ Line",           group=grp_vis)
+show_label      = input.bool(true,  "Show Signal Labels",         group=grp_vis)
+extend_lines    = input.bool(true,  "Extend Range Lines Right",   group=grp_vis)
+
+bull_col   = input.color(color.new(#00e676, 0),   "Bullish Color", group=grp_vis)
+bear_col   = input.color(color.new(#ff1744, 0),   "Bearish Color", group=grp_vis)
+box_transp = input.int(88, "Box Transparency", minval=50, maxval=95, group=grp_vis)
+
+grp_flt = "🔍  Filters"
+req_close_inside = input.bool(true,  "Require C2 close inside C1 body (stricter)", group=grp_flt)
+show_only_unswept = input.bool(false, "Hide CRT once target is reached",            group=grp_flt)
+
+// ─────────────────────────────────────────────
+// CRT DETECTION FUNCTION (returns signal for any TF)
+// ─────────────────────────────────────────────
+
+f_crt(tf) =>
+    // Fetch HTF OHLC bundles and their start times for C1(index 2) and C2(index 1)
+    [h1, l1, c1, h2, l2, o2, c2, t1, t2, t0] = request.security(syminfo.tickerid, tf, [high[1], low[1], close[1], high[2], low[2], open[2], close[2], time[1], time[2], time[0]], lookahead=barmerge.lookahead_off)
+
+    // C1 = index 2, C2 = index 1
+    c1_high = h2
+    c1_low  = l2
+    c1_body_top    = math.max(o2, c2)
+    c1_body_bottom = math.min(o2, c2)
+
+    c2_high  = h1
+    c2_low   = l1
+    c2_close = c1
+
+    // ── Bullish CRT: C2 sweeps C1 LOW then closes back inside ──
+    swept_low    = c2_low < c1_low
+    close_inside_bull = req_close_inside ? (c2_close > c1_body_bottom and c2_close < c1_high) : (c2_close > c1_low and c2_close < c1_high)
+    bull_crt = swept_low and close_inside_bull and not (c2_high > c1_high)
+
+    // ── Bearish CRT: C2 sweeps C1 HIGH then closes back inside ──
+    swept_high   = c2_high > c1_high
+    close_inside_bear = req_close_inside ? (c2_close < c1_body_top and c2_close > c1_low) : (c2_close < c1_high and c2_close > c1_low)
+    bear_crt = swept_high and close_inside_bear and not (c2_low < c1_low)
+
+    signal = bull_crt ? 1 : bear_crt ? -1 : 0
+    [signal, c1_high, c1_low, (c1_high + c1_low) / 2, t2, t1, t0]
+
+// ─────────────────────────────────────────────
+// FETCH SIGNALS FOR EACH TIMEFRAME
+// ─────────────────────────────────────────────
+[sig1, h1r, l1r, eq1, t1_c1, t1_c2, t1_curr] = f_crt(tf1)
+[sig2, h2r, l2r, eq2, t2_c1, t2_c2, t2_curr] = f_crt(tf2)
+[sig3, h3r, l3r, eq3, t3_c1, t3_c2, t3_curr] = f_crt(tf3)
+[sig4, h4r, l4r, eq4, t4_c1, t4_c2, t4_curr] = f_crt(tf4)
+
+// Mask with enable toggles
+s1 = tf1_on ? sig1 : 0
+s2 = tf2_on ? sig2 : 0
+s3 = tf3_on ? sig3 : 0
+s4 = tf4_on ? sig4 : 0
+
+// ─────────────────────────────────────────────
+// DRAW BOXES & LABELS HELPER
+// ─────────────────────────────────────────────
+f_draw(sig, tf_str, rng_high, rng_low, eq, c1_t, c2_t, curr_t) =>
+    // Only draw once per HTF bar change to avoid cluttering and hitting object limits
+    if sig != 0 and ta.change(curr_t)
+        is_bull  = sig == 1
+        bc       = is_bull ? bull_col : bear_col
+        bc_t     = color.new(bc, box_transp)
+        lbl_txt  = (is_bull ? "▲ BULL CRT" : "▼ BEAR CRT") + "\n" + tf_str
+        lbl_sty  = is_bull ? label.style_label_up : label.style_label_down
+        lbl_y    = is_bull ? rng_low : rng_high
+
+        if show_label
+            label.new(c2_t, lbl_y, text=lbl_txt, color=bc, textcolor=color.white, style=lbl_sty, size=size.small, xloc=xloc.bar_time)
+
+        ext = extend_lines ? extend.right : extend.none
+
+        if show_range_box
+            box.new(c1_t, rng_high, curr_t, rng_low, border_color=bc, border_width=1, bgcolor=bc_t, extend=ext, xloc=xloc.bar_time)
+
+        if show_eq_line
+            line.new(c1_t, eq, curr_t, eq, color=color.new(bc, 30), width=1, style=line.style_dashed, extend=ext, xloc=xloc.bar_time)
+
+f_draw(s1, tf1, h1r, l1r, eq1, t1_c1, t1_c2, t1_curr)
+f_draw(s2, tf2, h2r, l2r, eq2, t2_c1, t2_c2, t2_curr)
+f_draw(s3, tf3, h3r, l3r, eq3, t3_c1, t3_c2, t3_curr)
+f_draw(s4, tf4, h4r, l4r, eq4, t4_c1, t4_c2, t4_curr)
+
+// ─────────────────────────────────────────────
+// DASHBOARD TABLE (top-right corner)
+// ─────────────────────────────────────────────
+var table dash = table.new(position.top_right, 3, 5, border_width=1, border_color=color.new(color.gray, 60), bgcolor=color.new(#1a1a2e, 10))
+
+f_status(sig) => sig == 1 ? "▲ BULL" : sig == -1 ? "▼ BEAR" : "—"
+f_status_col(sig) => sig == 1 ? bull_col : sig == -1 ? bear_col : color.new(color.gray, 30)
+
+if barstate.islast
+    // Header
+    table.cell(dash, 0, 0, "TIMEFRAME", text_color=color.white, text_size=size.small, bgcolor=color.new(#1a1a2e, 0), text_halign=text.align_center)
+    table.cell(dash, 1, 0, "STATUS",    text_color=color.white, text_size=size.small, bgcolor=color.new(#1a1a2e, 0), text_halign=text.align_center)
+    table.cell(dash, 2, 0, "SIGNAL",    text_color=color.white, text_size=size.small, bgcolor=color.new(#1a1a2e, 0), text_halign=text.align_center)
+
+    // TF1
+    table.cell(dash, 0, 1, tf1, text_color=color.white, text_size=size.small, text_halign=text.align_center, bgcolor=tf1_on ? color.new(#1a1a2e, 20) : color.new(color.gray, 80))
+    table.cell(dash, 1, 1, tf1_on ? "ON" : "OFF", text_color=tf1_on ? color.lime : color.gray, text_size=size.small, text_halign=text.align_center, bgcolor=color.new(#1a1a2e, 20))
+    table.cell(dash, 2, 1, f_status(s1), text_color=f_status_col(s1), text_size=size.small, text_halign=text.align_center, bgcolor=color.new(f_status_col(s1), 80))
+
+    // TF2
+    table.cell(dash, 0, 2, tf2, text_color=color.white, text_size=size.small, text_halign=text.align_center, bgcolor=tf2_on ? color.new(#1a1a2e, 20) : color.new(color.gray, 80))
+    table.cell(dash, 1, 2, tf2_on ? "ON" : "OFF", text_color=tf2_on ? color.lime : color.gray, text_size=size.small, text_halign=text.align_center, bgcolor=color.new(#1a1a2e, 20))
+    table.cell(dash, 2, 2, f_status(s2), text_color=f_status_col(s2), text_size=size.small, text_halign=text.align_center, bgcolor=color.new(f_status_col(s2), 80))
+
+    // TF3
+    table.cell(dash, 0, 3, tf3, text_color=color.white, text_size=size.small, text_halign=text.align_center, bgcolor=tf3_on ? color.new(#1a1a2e, 20) : color.new(color.gray, 80))
+    table.cell(dash, 1, 3, tf3_on ? "ON" : "OFF", text_color=tf3_on ? color.lime : color.gray, text_size=size.small, text_halign=text.align_center, bgcolor=color.new(#1a1a2e, 20))
+    table.cell(dash, 2, 3, f_status(s3), text_color=f_status_col(s3), text_size=size.small, text_halign=text.align_center, bgcolor=color.new(f_status_col(s3), 80))
+
+    // TF4
+    table.cell(dash, 0, 4, tf4, text_color=color.white, text_size=size.small, text_halign=text.align_center, bgcolor=tf4_on ? color.new(#1a1a2e, 20) : color.new(color.gray, 80))
+    table.cell(dash, 1, 4, tf4_on ? "ON" : "OFF", text_color=tf4_on ? color.lime : color.gray, text_size=size.small, text_halign=text.align_center, bgcolor=color.new(#1a1a2e, 20))
+    table.cell(dash, 2, 4, f_status(s4), text_color=f_status_col(s4), text_size=size.small, text_halign=text.align_center, bgcolor=color.new(f_status_col(s4), 80))
+
+// ─────────────────────────────────────────────
+// BACKGROUND HIGHLIGHT on current-TF signal
+// ─────────────────────────────────────────────
+current_sig = timeframe.period == tf1 ? s1 : timeframe.period == tf2 ? s2 : timeframe.period == tf3 ? s3 : timeframe.period == tf4 ? s4 : 0
+bgcolor(current_sig == 1 ? color.new(bull_col, 92) : current_sig == -1 ? color.new(bear_col, 92) : na, title="CRT Background")
+
+// ─────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────
+alertcondition(s1 == 1,  title="TF1 Bullish CRT", message="🟢 Bullish CRT detected on TF1 ({{ticker}})")
+alertcondition(s1 == -1, title="TF1 Bearish CRT", message="🔴 Bearish CRT detected on TF1 ({{ticker}})")
+alertcondition(s2 == 1,  title="TF2 Bullish CRT", message="🟢 Bullish CRT detected on TF2 ({{ticker}})")
+alertcondition(s2 == -1, title="TF2 Bearish CRT", message="🔴 Bearish CRT detected on TF2 ({{ticker}})")
+alertcondition(s3 == 1,  title="TF3 Bullish CRT", message="🟢 Bullish CRT detected on TF3 ({{ticker}})")
+alertcondition(s3 == -1, title="TF3 Bearish CRT", message="🔴 Bearish CRT detected on TF3 ({{ticker}})")
+alertcondition(s4 == 1,  title="TF4 Bullish CRT", message="🟢 Bullish CRT detected on TF4 ({{ticker}})")
+alertcondition(s4 == -1, title="TF4 Bearish CRT", message="🔴 Bearish CRT detected on TF4 ({{ticker}})")
+
+any_bull = (s1 == 1) or (s2 == 1) or (s3 == 1) or (s4 == 1)
+any_bear = (s1 == -1) or (s2 == -1) or (s3 == -1) or (s4 == -1)
+alertcondition(any_bull, title="ANY Bullish CRT",  message="🟢 Bullish CRT — any timeframe ({{ticker}})")
+alertcondition(any_bear, title="ANY Bearish CRT",  message="🔴 Bearish CRT — any timeframe ({{ticker}})")
+
+bull_count = (s1 == 1 ? 1 : 0) + (s2 == 1 ? 1 : 0) + (s3 == 1 ? 1 : 0) + (s4 == 1 ? 1 : 0)
+bear_count = (s1 == -1 ? 1 : 0) + (s2 == -1 ? 1 : 0) + (s3 == -1 ? 1 : 0) + (s4 == -1 ? 1 : 0)
+alertcondition(bull_count >= 2, title="CONFLUENCE Bullish CRT", message="⚡ CONFLUENCE: 2+ TFs Bullish CRT ({{ticker}})")
+alertcondition(bear_count >= 2, title="CONFLUENCE Bearish CRT", message="⚡ CONFLUENCE: 2+ TFs Bearish CRT ({{ticker}})")

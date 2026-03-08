@@ -1,0 +1,290 @@
+// ============================================================
+// CRT + TBS | High Probability Setups  v6
+// ── Session Filter + IFVG Filter ──
+// Signals only fire inside allowed trading sessions
+// ============================================================
+
+//@version=5
+indicator("CRT + TBS | v6 Sessions + IFVG", shorttitle="CRT+TBS v6", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ── INPUTS ───────────────────────────────────────────────────
+grp_tf      = "⏱ Timeframe Settings"
+i_autoTF    = input.bool(true,   "Auto-select Bias TF",             group=grp_tf, tooltip="1m→15m | 5m→1H | 15m→4H | 1H→D")
+i_biasTF    = input.timeframe("60","Manual Bias TF (if Auto OFF)",  group=grp_tf)
+
+grp_sess    = "🕐 Session Filter"
+i_sessOn    = input.bool(true,   "Enable Session Filter",           group=grp_sess, tooltip="Only fire signals inside allowed sessions")
+i_timezone  = input.string("UTC","Chart Timezone",                  group=grp_sess, options=["UTC","America/New_York","Europe/London","Asia/Tokyo","Asia/Singapore","Asia/Bangkok","Australia/Sydney"])
+i_asiaSess  = input.bool(true,   "Asian Session",                   group=grp_sess, tooltip="00:00-09:00 Tokyo time")
+i_asiaStart = input.session("0000-0900", "Asian Hours",             group=grp_sess)
+i_lonSess   = input.bool(true,   "London Session",                  group=grp_sess, tooltip="07:00-12:00 UTC")
+i_lonStart  = input.session("0700-1200", "London Hours",            group=grp_sess)
+i_nySess    = input.bool(true,   "New York Session",                group=grp_sess, tooltip="13:00-22:00 UTC")
+i_nyStart   = input.session("1300-2200", "New York Hours",          group=grp_sess)
+i_lcSess    = input.bool(false,  "London Close Session",            group=grp_sess, tooltip="14:00-16:00 UTC")
+i_lcStart   = input.session("1400-1600", "London Close Hours",      group=grp_sess)
+i_showSess  = input.bool(true,   "Highlight Sessions on Chart",     group=grp_sess)
+
+grp_ifvg    = "🔲 IFVG Filter"
+i_ifvgOn    = input.bool(true,   "Enable IFVG Filter",              group=grp_ifvg, tooltip="Block signals when price is inside an opposing IFVG")
+i_ifvgLook  = input.int(50,      "FVG Lookback (bars)",             group=grp_ifvg, minval=10, maxval=200)
+i_showIFVG  = input.bool(true,   "Show Active IFVG Zones",          group=grp_ifvg)
+i_showBlock = input.bool(true,   "Show Blocked Signal",             group=grp_ifvg)
+
+grp_crt     = "📦 CRT Settings"
+i_showRange = input.bool(true,   "Show Bias Candle Range Box",       group=grp_crt)
+i_showManip = input.bool(true,   "Show Manipulation Marker",         group=grp_crt)
+i_showFVG   = input.bool(true,   "Show FVG Inside Range",            group=grp_crt)
+
+grp_tbs     = "🐢 TBS Settings"
+i_tbs       = input.bool(true,   "Enable TBS Detection",             group=grp_tbs)
+i_tbsLook   = input.int(10,      "Equal H/L Lookback (bars)",        group=grp_tbs, minval=3, maxval=50)
+i_tbsTol    = input.float(0.1,   "Equal H/L Tolerance (%)",          group=grp_tbs, minval=0.0, maxval=1.0, step=0.05)
+i_tbsConf   = input.bool(true,   "Confluence Mode (CRT+TBS only)",   group=grp_tbs)
+
+grp_rr      = "📐 RR Box Settings"
+i_showRR    = input.bool(true,   "Show RR Box",                      group=grp_rr)
+i_rrMult    = input.float(3.0,   "Risk/Reward Multiplier",           group=grp_rr, minval=0.5, maxval=20.0, step=0.5)
+i_rrBars    = input.int(50,      "RR Box Width (bars)",              group=grp_rr, minval=5, maxval=300)
+i_acctSize  = input.float(10000, "Account Size",                     group=grp_rr, minval=1)
+i_riskPct   = input.float(1.0,   "Risk % per Trade",                 group=grp_rr, minval=0.1, maxval=100, step=0.1)
+
+grp_style   = "🎨 Style"
+i_colBiasB  = input.color(color.new(#00bcd4, 82), "Bias Range Bull",   group=grp_style)
+i_colBiasR  = input.color(color.new(#ff5722, 82), "Bias Range Bear",   group=grp_style)
+i_colTP     = input.color(color.new(#00c853, 70), "TP Box Color",      group=grp_style)
+i_colSL     = input.color(color.new(#d50000, 70), "SL Box Color",      group=grp_style)
+i_colEntry  = input.color(color.new(#1565c0, 65), "Entry Box Color",   group=grp_style)
+i_colFVG    = input.color(color.new(#9c27b0, 72), "FVG (CRT) Color",   group=grp_style)
+i_colIFVGR  = input.color(color.new(#ff1744, 55), "Bearish IFVG Zone", group=grp_style)
+i_colIFVGB  = input.color(color.new(#00e676, 55), "Bullish IFVG Zone", group=grp_style)
+i_colTBS    = input.color(color.new(#ffd600, 0),  "TBS Dot Color",     group=grp_style)
+i_colConf   = input.color(color.new(#e91e63, 0),  "Confluence Color",  group=grp_style)
+i_colBlock  = input.color(color.new(#78909c, 0),  "Blocked Signal",    group=grp_style)
+i_colAsia   = input.color(color.new(#ffd600, 90), "Asian Session BG",  group=grp_style)
+i_colLon    = input.color(color.new(#2196f3, 90), "London Session BG", group=grp_style)
+i_colNY     = input.color(color.new(#ff9800, 90), "New York Session BG",group=grp_style)
+i_colLC     = input.color(color.new(#e91e63, 90), "London Close BG",   group=grp_style)
+
+grp_alerts  = "🔔 Alerts"
+i_alertBuy  = input.bool(true,   "Alert on BUY",                     group=grp_alerts)
+i_alertSell = input.bool(true,   "Alert on SELL",                    group=grp_alerts)
+i_alertBlk  = input.bool(false,  "Alert on Blocked",                 group=grp_alerts)
+
+// ── AUTO BIAS TF ─────────────────────────────────────────────
+getBiasTF() =>
+    tf = timeframe.period
+    tf == "1" ? "15" : tf == "5" ? "60" : tf == "15" ? "240" : tf == "60" ? "D" : "D"
+
+biasTF = i_autoTF ? getBiasTF() : i_biasTF
+
+// ── SESSION DETECTION ────────────────────────────────────────
+inAsia = i_asiaSess and not na(time(timeframe.period, i_asiaStart, i_timezone))
+inLon  = i_lonSess  and not na(time(timeframe.period, i_lonStart,  i_timezone))
+inNY   = i_nySess   and not na(time(timeframe.period, i_nyStart,   i_timezone))
+inLC   = i_lcSess   and not na(time(timeframe.period, i_lcStart,   i_timezone))
+
+inAnySession = i_sessOn ? (inAsia or inLon or inNY or inLC) : true
+
+sessionName  = inLC ? "London Close" : inNY ? "New York" : inLon ? "London" : inAsia ? "Asian" : "Off-Session"
+sessDispCol  = inLC ? #e91e63 : inNY ? #ff9800 : inLon ? #2196f3 : inAsia ? #ffd600 : color.gray
+
+bgcolor(i_showSess and inAsia and not inLon and not inNY and not inLC ? i_colAsia : na, title="Asian BG")
+bgcolor(i_showSess and inLon  and not inNY  and not inLC              ? i_colLon  : na, title="London BG")
+bgcolor(i_showSess and inNY   and not inLC                            ? i_colNY   : na, title="NY BG")
+bgcolor(i_showSess and inLC                                           ? i_colLC   : na, title="London Close BG")
+
+// ── BIAS CANDLE DATA ─────────────────────────────────────────
+[biasO, biasH, biasL, biasC] = request.security(syminfo.tickerid, biasTF, [open[1], high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+
+biasBull = biasC > biasO
+rangeH   = biasH
+rangeL   = biasL
+rangeMid = (rangeH + rangeL) / 2.0
+
+// ── CRT LOGIC ────────────────────────────────────────────────
+manipBull = low  < rangeL and close > rangeL
+manipBear = high > rangeH and close < rangeH
+distBull  = manipBull and close > rangeMid
+distBear  = manipBear and close < rangeMid
+
+fvgBull = low > high[2] and high[1] < rangeH and low[1] > rangeL
+fvgBear = high < low[2] and low[1]  > rangeL and high[1] < rangeH
+
+// ── TBS LOGIC ────────────────────────────────────────────────
+tol = i_tbsTol / 100.0
+eqH = false
+eqL = false
+
+if i_tbs
+    for i = 2 to i_tbsLook
+        if math.abs(high[i] - high[1]) / math.max(high[1], 1e-10) <= tol
+            eqH := true
+        if math.abs(low[i]  - low[1])  / math.max(low[1],  1e-10) <= tol
+            eqL := true
+
+tbsBull = i_tbs and eqL and low  < low[1]  and close > low[1]
+tbsBear = i_tbs and eqH and high > high[1] and close < high[1]
+
+// ── RAW SIGNALS ──────────────────────────────────────────────
+confBull = manipBull and tbsBull
+confBear = manipBear and tbsBear
+rawBuy   = i_tbsConf ? confBull : distBull
+rawSell  = i_tbsConf ? confBear : distBear
+
+// ── IFVG DETECTION ───────────────────────────────────────────
+ifvgBearActive = false
+ifvgBullActive = false
+
+var float ifvgBearTop = na
+var float ifvgBearBot = na
+var float ifvgBullTop = na
+var float ifvgBullBot = na
+
+for i = 3 to i_ifvgLook
+    bullFvgTop = low[i]
+    bullFvgBot = high[i + 2]
+    if bullFvgTop > bullFvgBot
+        if close <= bullFvgTop and close >= bullFvgBot
+            ifvgBearActive := true
+            ifvgBearTop    := bullFvgTop
+            ifvgBearBot    := bullFvgBot
+    bearFvgTop = low[i + 2]
+    bearFvgBot = high[i]
+    if bearFvgTop > bearFvgBot
+        if close <= bearFvgTop and close >= bearFvgBot
+            ifvgBullActive := true
+            ifvgBullTop    := bearFvgTop
+            ifvgBullBot    := bearFvgBot
+
+// ── APPLY ALL FILTERS ────────────────────────────────────────
+ifvgBlockBuy  = i_ifvgOn and ifvgBearActive
+ifvgBlockSell = i_ifvgOn and ifvgBullActive
+
+buySignal  = rawBuy  and not ifvgBlockBuy  and inAnySession
+sellSignal = rawSell and not ifvgBlockSell and inAnySession
+
+blockedByIFVG_Buy   = i_showBlock and rawBuy  and ifvgBlockBuy  and inAnySession
+blockedByIFVG_Sell  = i_showBlock and rawSell and ifvgBlockSell and inAnySession
+blockedBySess_Buy   = i_showBlock and rawBuy  and not inAnySession and not ifvgBlockBuy
+blockedBySess_Sell  = i_showBlock and rawSell and not inAnySession and not ifvgBlockSell
+
+// ── DRAW IFVG ZONES ──────────────────────────────────────────
+var bool prevBearIFVG = false
+var bool prevBullIFVG = false
+
+if i_showIFVG and ifvgBearActive and not prevBearIFVG and not na(ifvgBearTop) and not na(ifvgBearBot)
+    box.new(bar_index, ifvgBearTop, bar_index + i_rrBars, ifvgBearBot, border_color=color.new(#ff1744, 20), bgcolor=i_colIFVGR, border_width=1)
+    label.new(bar_index, ifvgBearTop, "Bear IFVG - BUY blocked", style=label.style_label_down, color=color.new(#ff1744, 10), textcolor=color.white, size=size.tiny)
+
+if i_showIFVG and ifvgBullActive and not prevBullIFVG and not na(ifvgBullTop) and not na(ifvgBullBot)
+    box.new(bar_index, ifvgBullTop, bar_index + i_rrBars, ifvgBullBot, border_color=color.new(#00e676, 20), bgcolor=i_colIFVGB, border_width=1)
+    label.new(bar_index, ifvgBullBot, "Bull IFVG - SELL blocked", style=label.style_label_up, color=color.new(#00e676, 10), textcolor=color.white, size=size.tiny)
+
+prevBearIFVG := ifvgBearActive
+prevBullIFVG := ifvgBullActive
+
+// ── BIAS RANGE BOX ───────────────────────────────────────────
+var box   biasBox  = na
+var line  biasLine = na
+var float prevH    = na
+var float prevL    = na
+
+if i_showRange and (rangeH != prevH or rangeL != prevL)
+    if not na(biasBox)
+        box.delete(biasBox)
+    if not na(biasLine)
+        line.delete(biasLine)
+    col      = biasBull ? i_colBiasB : i_colBiasR
+    biasBox  := box.new(bar_index, rangeH, bar_index + 80, rangeL, border_color=color.new(col, 30), bgcolor=col, border_width=1, extend=extend.right)
+    biasLine := line.new(bar_index, rangeMid, bar_index + 80, rangeMid, color=color.new(color.gray, 55), style=line.style_dashed, width=1, extend=extend.right)
+    prevH    := rangeH
+    prevL    := rangeL
+
+if i_showRange and not na(biasBox)
+    box.set_right(biasBox, bar_index + 20)
+if i_showRange and not na(biasLine)
+    line.set_x2(biasLine, bar_index + 20)
+
+// ── CRT FVG BOXES ────────────────────────────────────────────
+if i_showFVG and fvgBull
+    box.new(bar_index - 2, high[2], bar_index, low, border_color=i_colFVG, bgcolor=i_colFVG, border_width=1)
+if i_showFVG and fvgBear
+    box.new(bar_index - 2, low[2], bar_index, high, border_color=i_colFVG, bgcolor=i_colFVG, border_width=1)
+
+// ── RR BOX ───────────────────────────────────────────────────
+if i_showRR and (buySignal or sellSignal)
+    isLong    = buySignal
+    entryP    = close
+    stopP     = isLong ? math.min(rangeL, low) - syminfo.mintick * 3 : math.max(rangeH, high) + syminfo.mintick * 3
+    riskPts   = math.abs(entryP - stopP)
+    tpP       = isLong ? entryP + riskPts * i_rrMult : entryP - riskPts * i_rrMult
+    riskUSD   = i_acctSize * i_riskPct / 100.0
+    profitUSD = riskUSD * i_rrMult
+    qty       = riskPts > 0 ? riskUSD / riskPts : 0.0
+    tpPct     = riskPts / entryP * i_rrMult * 100.0
+    slPct     = riskPts / entryP * 100.0
+    band      = riskPts * 0.06
+    x1        = bar_index
+    x2        = bar_index + i_rrBars
+    sesTag    = " [" + sessionName + "]"
+
+    box.new(x1, isLong ? tpP : entryP, x2, isLong ? entryP : tpP, border_color=color.new(#00c853, 15), bgcolor=i_colTP, border_width=1)
+    box.new(x1, entryP + band, x2, entryP - band, border_color=color.new(#2196f3, 0), bgcolor=i_colEntry, border_width=2)
+    box.new(x1, isLong ? entryP : stopP, x2, isLong ? stopP : entryP, border_color=color.new(#d50000, 15), bgcolor=i_colSL, border_width=1)
+
+    label.new(x1 + 2, tpP,    "Target: " + str.tostring(tpP, format.mintick) + "  (" + str.tostring(tpPct, "#.##") + "%)  Qty: " + str.tostring(qty, "#.###") + "  Profit: $" + str.tostring(profitUSD, "#.##") + sesTag, yloc=yloc.price, style=label.style_label_right, color=color.new(#00c853, 10), textcolor=color.white, size=size.small)
+    label.new(x1 + 2, entryP, "RR 1:" + str.tostring(i_rrMult, "#.#") + "   Risk: $" + str.tostring(riskUSD, "#.##") + "   Qty: " + str.tostring(qty, "#.###"),                                                                   yloc=yloc.price, style=label.style_label_right, color=color.new(#1565c0, 10), textcolor=color.white, size=size.small)
+    label.new(x1 + 2, stopP,  "Stop: "  + str.tostring(stopP, format.mintick) + "  (" + str.tostring(slPct, "#.##") + "%)  Qty: " + str.tostring(qty, "#.###") + "  Risk: $" + str.tostring(riskUSD, "#.##"),                      yloc=yloc.price, style=label.style_label_right, color=color.new(#d50000, 10), textcolor=color.white, size=size.small)
+
+// ── SIGNAL SHAPES ────────────────────────────────────────────
+plotshape(buySignal,            title="BUY",                style=shape.labelup,      location=location.belowbar, color=color.new(#00e676, 0),   size=size.normal, text="BUY",    textcolor=color.white)
+plotshape(sellSignal,           title="SELL",               style=shape.labeldown,    location=location.abovebar, color=color.new(#ff1744, 0),   size=size.normal, text="SELL",   textcolor=color.white)
+plotshape(blockedByIFVG_Buy,    title="Blk BUY (IFVG)",    style=shape.xcross,       location=location.belowbar, color=i_colBlock,              size=size.small,  text="IFVG",   textcolor=i_colBlock)
+plotshape(blockedByIFVG_Sell,   title="Blk SELL (IFVG)",   style=shape.xcross,       location=location.abovebar, color=i_colBlock,              size=size.small,  text="IFVG",   textcolor=i_colBlock)
+plotshape(blockedBySess_Buy,    title="Blk BUY (Sess)",    style=shape.xcross,       location=location.belowbar, color=color.new(#546e7a, 0),   size=size.tiny,   text="SESS",   textcolor=color.new(#546e7a, 0))
+plotshape(blockedBySess_Sell,   title="Blk SELL (Sess)",   style=shape.xcross,       location=location.abovebar, color=color.new(#546e7a, 0),   size=size.tiny,   text="SESS",   textcolor=color.new(#546e7a, 0))
+plotshape(i_showManip and manipBull and not rawBuy,  title="Manip Bull", style=shape.triangleup,   location=location.belowbar, color=color.new(#ff9800, 0), size=size.tiny, text="M", textcolor=color.new(#ff9800, 0))
+plotshape(i_showManip and manipBear and not rawSell, title="Manip Bear", style=shape.triangledown, location=location.abovebar, color=color.new(#ff9800, 0), size=size.tiny, text="M", textcolor=color.new(#ff9800, 0))
+plotshape(i_tbs and tbsBull and not confBull, title="TBS Bull", style=shape.circle, location=location.belowbar, color=i_colTBS, size=size.small, text="TBS", textcolor=i_colTBS)
+plotshape(i_tbs and tbsBear and not confBear, title="TBS Bear", style=shape.circle, location=location.abovebar, color=i_colTBS, size=size.small, text="TBS", textcolor=i_colTBS)
+// shape.star is INVALID in Pine v5 — using shape.diamond
+plotshape(confBull and not ifvgBlockBuy  and inAnySession, title="Conf Bull", style=shape.diamond, location=location.belowbar, color=i_colConf, size=size.large, text="CRT+TBS", textcolor=i_colConf)
+plotshape(confBear and not ifvgBlockSell and inAnySession, title="Conf Bear", style=shape.diamond, location=location.abovebar, color=i_colConf, size=size.large, text="CRT+TBS", textcolor=i_colConf)
+
+// ── INFO TABLE ───────────────────────────────────────────────
+var table tbl = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black, 65), border_color=color.new(color.gray, 50), border_width=1)
+
+if barstate.islast
+    table.cell(tbl, 0, 0,  "CHART TF",  text_color=color.gray,   text_size=size.small)
+    table.cell(tbl, 1, 0,  timeframe.period + (timeframe.isintraday ? "m" : ""), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 1,  "BIAS TF",   text_color=color.gray,   text_size=size.small)
+    table.cell(tbl, 1, 1,  biasTF,      text_color=color.aqua,   text_size=size.small)
+    table.cell(tbl, 0, 2,  "RANGE H",   text_color=color.gray,   text_size=size.small)
+    table.cell(tbl, 1, 2,  str.tostring(rangeH, format.mintick),  text_color=color.red,    text_size=size.small)
+    table.cell(tbl, 0, 3,  "RANGE L",   text_color=color.gray,   text_size=size.small)
+    table.cell(tbl, 1, 3,  str.tostring(rangeL, format.mintick),  text_color=color.lime,   text_size=size.small)
+    table.cell(tbl, 0, 4,  "BIAS",      text_color=color.gray,   text_size=size.small)
+    table.cell(tbl, 1, 4,  biasBull ? "BULL" : "BEAR",            text_color=biasBull ? color.lime : color.red, text_size=size.small)
+    table.cell(tbl, 0, 5,  "SESSION",   text_color=color.gray,   text_size=size.small)
+    table.cell(tbl, 1, 5,  inAnySession ? sessionName : "Off-Hours", text_color=inAnySession ? sessDispCol : color.gray, text_size=size.small)
+    table.cell(tbl, 0, 6,  "TRADE OK",  text_color=color.gray,   text_size=size.small)
+    table.cell(tbl, 1, 6,  inAnySession ? "YES" : "NO",           text_color=inAnySession ? color.lime : color.red, text_size=size.small)
+    table.cell(tbl, 0, 7,  "Bear IFVG", text_color=color.gray,   text_size=size.small)
+    table.cell(tbl, 1, 7,  ifvgBearActive ? "ACTIVE" : "clear",   text_color=ifvgBearActive ? color.red  : color.gray, text_size=size.small)
+    table.cell(tbl, 0, 8,  "Bull IFVG", text_color=color.gray,   text_size=size.small)
+    table.cell(tbl, 1, 8,  ifvgBullActive ? "ACTIVE" : "clear",   text_color=ifvgBullActive ? color.lime : color.gray, text_size=size.small)
+    table.cell(tbl, 0, 9,  "RR",        text_color=color.gray,   text_size=size.small)
+    table.cell(tbl, 1, 9,  "1:" + str.tostring(i_rrMult, "#.#"),  text_color=color.yellow, text_size=size.small)
+    table.cell(tbl, 0, 10, "TZ",        text_color=color.gray,   text_size=size.small)
+    table.cell(tbl, 1, 10, i_timezone,  text_color=color.silver, text_size=size.tiny)
+
+// ── ALERTS ───────────────────────────────────────────────────
+alertcondition(i_alertBuy  and buySignal,          title="BUY - Session + IFVG Clear",       message="BUY: Inside valid session. No IFVG blocking. CRT+TBS confirmed.")
+alertcondition(i_alertSell and sellSignal,         title="SELL - Session + IFVG Clear",      message="SELL: Inside valid session. No IFVG blocking. CRT+TBS confirmed.")
+alertcondition(i_alertBlk  and blockedByIFVG_Buy,  title="BUY Blocked - Bearish IFVG",       message="BUY blocked: Price inside bearish IFVG. In session but no trade.")
+alertcondition(i_alertBlk  and blockedByIFVG_Sell, title="SELL Blocked - Bullish IFVG",      message="SELL blocked: Price inside bullish IFVG. In session but no trade.")
+alertcondition(i_alertBlk  and blockedBySess_Buy,  title="BUY Blocked - Off Session",        message="BUY blocked: Outside allowed trading session. No trade.")
+alertcondition(i_alertBlk  and blockedBySess_Sell, title="SELL Blocked - Off Session",       message="SELL blocked: Outside allowed trading session. No trade.")
+alertcondition(confBull and not ifvgBlockBuy  and inAnySession, title="MAX CONF BUY - Session+IFVG+CRT+TBS",  message="HIGHEST PROB BUY: Valid session + IFVG clear + CRT + TBS bullish.")
+alertcondition(confBear and not ifvgBlockSell and inAnySession, title="MAX CONF SELL - Session+IFVG+CRT+TBS", message="HIGHEST PROB SELL: Valid session + IFVG clear + CRT + TBS bearish.")

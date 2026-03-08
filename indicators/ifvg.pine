@@ -1,374 +1,414 @@
 // ============================================================
-// FVG ASIA SESSION  |  Pine Script v5
-// Trade only during Asia (00:00 – 09:00 UTC)
-// Logic: Liquidity Sweep  →  FVG forms  →  Signal + RR zones
+// CRT + TBS | High Probability Setups  v5
+// ── IFVG Filter: Never trade against an active IFVG ──
 // ============================================================
+// IFVG (Inverse Fair Value Gap) Logic:
+//   A regular FVG that price has RETURNED INTO becomes an IFVG.
+//   Once price re-enters an old FVG, that gap flips:
+//     Old Bullish FVG re-entered from above = BEARISH IFVG (resistance) → block BUY
+//     Old Bearish FVG re-entered from below = BULLISH IFVG (support)    → block SELL
+// ============================================================
+
 //@version=5
-indicator("FVG Asia Session [Sweep → FVG → RR]",
-     shorttitle = "FVG ASIA",
-     overlay    = true,
-     max_lines_count  = 500,
-     max_boxes_count  = 500,
-     max_labels_count = 500)
+indicator("CRT + TBS | v5 IFVG Filter", shorttitle="CRT+TBS v5", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
 
-// ─────────────────────────────────────────────
-// ░░  INPUTS
-// ─────────────────────────────────────────────
+// ============================================================
+// ── INPUTS
+// ============================================================
+grp_tf      = "⏱ Timeframe Settings"
+i_autoTF    = input.bool(true,    "Auto-select Bias TF",              group=grp_tf, tooltip="1m→15m | 5m→1H | 15m→4H | 1H→D")
+i_biasTF    = input.timeframe("60","Manual Bias TF (if Auto OFF)",    group=grp_tf)
 
-grp_sess = "═══  Asia Session  ═══"
-i_asiaStart = input.int(0,  "Session Start (UTC hour)", minval=0, maxval=23, group=grp_sess,
-     tooltip="Default 0 = midnight UTC = 07:00 Bangkok / 08:00 Singapore / Tokyo.")
-i_asiaEnd   = input.int(9,  "Session End   (UTC hour)", minval=1, maxval=23, group=grp_sess,
-     tooltip="Default 9 = 09:00 UTC = 16:00 Bangkok / 17:00 Singapore.")
-i_shadeAsia = input.bool(true, "Shade Asia Session Background", group=grp_sess)
+grp_ifvg    = "🔲 IFVG Filter"
+i_ifvgOn    = input.bool(true,    "Enable IFVG Filter",               group=grp_ifvg, tooltip="Block signals when price is inside an opposing IFVG")
+i_ifvgLook  = input.int(50,       "FVG Lookback (bars)",              group=grp_ifvg, minval=10, maxval=200)
+i_showIFVG  = input.bool(true,    "Show Active IFVG Zones",           group=grp_ifvg)
+i_showBlock = input.bool(true,    "Show Blocked Signal (⊘IFVG)",      group=grp_ifvg)
 
-grp_liq = "═══  Liquidity Sweep  ═══"
-i_pivLen    = input.int  (3,    "Pivot Length (bars each side)", minval=1, maxval=10, group=grp_liq,
-     tooltip="Bars left/right to confirm a swing high/low.")
-i_liqWin    = input.int  (10,   "Sweep Memory (bars)",           minval=2, maxval=30,  group=grp_liq,
-     tooltip="After a sweep, signal is valid for this many bars while waiting for the FVG.")
-i_liqBuf    = input.float(0.0,  "Sweep Buffer (%)",              minval=0.0, step=0.01, group=grp_liq,
-     tooltip="Price must pierce the pivot by at least this % to count as a sweep.")
-i_showSwMark = input.bool(true, "Show Sweep Marker on Chart",   group=grp_liq,
-     tooltip="Paint a diamond on the candle that swept the pivot level.")
+grp_crt     = "📦 CRT Settings"
+i_showRange = input.bool(true,    "Show Bias Candle Range Box",        group=grp_crt)
+i_showManip = input.bool(true,    "Show Manipulation Marker",          group=grp_crt)
+i_showFVG   = input.bool(true,    "Show FVG Inside Range",             group=grp_crt)
 
-grp_fvg = "═══  FVG Detection  ═══"
-i_minGapPct = input.float(0.05, "Min Gap Size (%)", minval=0.0, step=0.01, group=grp_fvg,
-     tooltip="Minimum size of the imbalance gap as % of price. Reduce for crypto/indices.")
-i_dir       = input.string("Both", "Signal Direction",
-     options=["Both","Bullish Only","Bearish Only"], group=grp_fvg)
+grp_tbs     = "🐢 TBS Settings"
+i_tbs       = input.bool(true,    "Enable TBS Detection",              group=grp_tbs)
+i_tbsLook   = input.int(10,       "Equal H/L Lookback (bars)",         group=grp_tbs, minval=3, maxval=50)
+i_tbsTol    = input.float(0.1,    "Equal H/L Tolerance (%)",           group=grp_tbs, minval=0.0, maxval=1.0, step=0.05)
+i_tbsConf   = input.bool(true,    "Confluence Mode (CRT+TBS only)",    group=grp_tbs)
 
-grp_rr = "═══  Risk / Reward  ═══"
-i_entryType = input.string("FVG Mid", "Entry at",
-     options=["FVG Mid","FVG Edge","Close"], group=grp_rr,
-     tooltip="FVG Mid = midpoint of the gap (recommended for Asia). FVG Edge = near side. Close = signal bar close.")
-i_slType    = input.string("Gap Edge", "Stop-Loss at",
-     options=["Gap Edge","Last Pivot","Lookback"], group=grp_rr,
-     tooltip="Gap Edge = tight SL just past the far side of the gap (recommended). Last Pivot = swept pivot. Lookback = n-bar extreme.")
-i_slLookback = input.int  (5,   "SL Lookback (bars)", minval=1, maxval=30, group=grp_rr)
-i_slBuf      = input.float(0.1, "SL Buffer (%)",      minval=0.0, step=0.05, group=grp_rr)
-i_rr1        = input.float(1.5, "TP1 R:R",            minval=0.1, step=0.1,  group=grp_rr)
-i_rr2        = input.float(3.0, "TP2 R:R",            minval=0.1, step=0.1,  group=grp_rr)
+grp_rr      = "📐 RR Box Settings"
+i_showRR    = input.bool(true,    "Show RR Box",                       group=grp_rr)
+i_rrMult    = input.float(3.0,    "Risk/Reward Multiplier",            group=grp_rr, minval=0.5, maxval=20.0, step=0.5)
+i_rrBars    = input.int(50,       "RR Box Width (bars)",               group=grp_rr, minval=5, maxval=300)
+i_acctSize  = input.float(10000,  "Account Size",                      group=grp_rr, minval=1)
+i_riskPct   = input.float(1.0,    "Risk % per Trade",                  group=grp_rr, minval=0.1, maxval=100, step=0.1)
 
-grp_vis = "═══  Visuals  ═══"
-i_extBars    = input.int  (40,  "Box Extend Right (bars)", minval=5, maxval=500, group=grp_vis)
-i_bullCol    = input.color(color.new(#00e676, 0), "Bullish Color", group=grp_vis)
-i_bearCol    = input.color(color.new(#ff1744, 0), "Bearish Color", group=grp_vis)
-i_alpha      = input.int  (82,  "Box Transparency",        minval=0, maxval=99, group=grp_vis)
-i_showGap    = input.bool (true, "Shade FVG Gap Zone",     group=grp_vis)
-i_showLabels = input.bool (true, "Show Price Labels",      group=grp_vis)
-i_showDash   = input.bool (true, "Show Dashboard",         group=grp_vis)
+grp_style   = "🎨 Style"
+i_colBiasB  = input.color(color.new(#00bcd4, 82), "Bias Range Bull",   group=grp_style)
+i_colBiasR  = input.color(color.new(#ff5722, 82), "Bias Range Bear",   group=grp_style)
+i_colTP     = input.color(color.new(#00c853, 70), "TP Box Color",      group=grp_style)
+i_colSL     = input.color(color.new(#d50000, 70), "SL Box Color",      group=grp_style)
+i_colEntry  = input.color(color.new(#1565c0, 65), "Entry Box Color",   group=grp_style)
+i_colFVG    = input.color(color.new(#9c27b0, 72), "FVG (CRT) Color",   group=grp_style)
+i_colIFVGR  = input.color(color.new(#ff1744, 55), "Bearish IFVG Zone", group=grp_style)
+i_colIFVGB  = input.color(color.new(#00e676, 55), "Bullish IFVG Zone", group=grp_style)
+i_colTBS    = input.color(color.new(#ffd600, 0),  "TBS Dot Color",     group=grp_style)
+i_colConf   = input.color(color.new(#e91e63, 0),  "Confluence Color",  group=grp_style)
+i_colBlock  = input.color(color.new(#78909c, 0),  "Blocked Signal",    group=grp_style)
 
-// ─────────────────────────────────────────────
-// ░░  ASIA SESSION GATE
-// ─────────────────────────────────────────────
+grp_alerts  = "🔔 Alerts"
+i_alertBuy  = input.bool(true,    "Alert on BUY",                      group=grp_alerts)
+i_alertSell = input.bool(true,    "Alert on SELL",                     group=grp_alerts)
+i_alertBlk  = input.bool(false,   "Alert on Blocked (IFVG)",           group=grp_alerts)
 
-utcH     = hour(time, "UTC")
-inAsia   = utcH >= i_asiaStart and utcH < i_asiaEnd
+// ============================================================
+// ── AUTO BIAS TF
+// ============================================================
+getBiasTF() =>
+    tf = timeframe.period
+    tf == "1" ? "15" : tf == "5" ? "60" : tf == "15" ? "240" : tf == "60" ? "D" : "D"
 
-// Background shading
-bgcolor(i_shadeAsia and inAsia ? color.new(#4a148c, 91) : na, title="Asia Background")
+biasTF = i_autoTF ? getBiasTF() : i_biasTF
 
-// ─────────────────────────────────────────────
-// ░░  TREND & STRUCTURE  (for score / filter)
-// ─────────────────────────────────────────────
+// ============================================================
+// ── BIAS CANDLE DATA
+// ============================================================
+[biasO, biasH, biasL, biasC] = request.security(syminfo.tickerid, biasTF,
+     [open[1], high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
 
-ema20 = ta.ema(close, 20)
-ema50 = ta.ema(close, 50)
-trendUp   = ema20 > ema50
-trendDown = ema20 < ema50
+biasBull = biasC > biasO
+rangeH   = biasH
+rangeL   = biasL
+rangeMid = (rangeH + rangeL) / 2.0
 
-swH = ta.pivothigh(high, 3, 3)
-swL = ta.pivotlow (low,  3, 3)
-var float lastSH = na
-var float lastSL = na
-if not na(swH)
-    lastSH := swH
-if not na(swL)
-    lastSL := swL
+// ============================================================
+// ── CRT LOGIC
+// ============================================================
+manipBull = low  < rangeL and close > rangeL
+manipBear = high > rangeH and close < rangeH
+distBull  = manipBull and close > rangeMid
+distBear  = manipBear and close < rangeMid
 
-bullStruct = not na(lastSL) and close > lastSL
-bearStruct = not na(lastSH) and close < lastSH
+fvgBull = low > high[2] and high[1] < rangeH and low[1] > rangeL
+fvgBear = high < low[2] and low[1]  > rangeL and high[1] < rangeH
 
-// ─────────────────────────────────────────────
-// ░░  LIQUIDITY SWEEP DETECTION
-// ─────────────────────────────────────────────
-// Pivot-based: track the most-recent confirmed pivot H/L.
-// Sweep = wick through pivot by >= buffer  +  close reverses back.
+// ============================================================
+// ── TBS LOGIC
+// ============================================================
+tol = i_tbsTol / 100.0
+eqH = false
+eqL = false
 
-pivH = ta.pivothigh(high, i_pivLen, i_pivLen)
-pivL = ta.pivotlow (low,  i_pivLen, i_pivLen)
+if i_tbs
+    for i = 2 to i_tbsLook
+        if math.abs(high[i] - high[1]) / math.max(high[1], 1e-10) <= tol
+            eqH := true
+        if math.abs(low[i]  - low[1])  / math.max(low[1],  1e-10) <= tol
+            eqL := true
 
-var float rPivH = na   // most recent confirmed pivot high
-var float rPivL = na   // most recent confirmed pivot low
-if not na(pivH)
-    rPivH := pivH
-if not na(pivL)
-    rPivL := pivL
+tbsBull = i_tbs and eqL and low  < low[1]  and close > low[1]
+tbsBear = i_tbs and eqH and high > high[1] and close < high[1]
 
-// Sweep conditions (only valid inside Asia session)
-bullSwNow = inAsia and not na(rPivL) and low  < rPivL * (1 - i_liqBuf / 100) and close > rPivL  // wick below, close back above
-bearSwNow = inAsia and not na(rPivH) and high > rPivH * (1 + i_liqBuf / 100) and close < rPivH  // wick above, close back below
+// ============================================================
+// ── RAW SIGNALS
+// ============================================================
+confBull = manipBull and tbsBull
+confBear = manipBear and tbsBear
+rawBuy   = i_tbsConf ? confBull : distBull
+rawSell  = i_tbsConf ? confBear : distBear
 
-// Remember sweep for i_liqWin bars so FVG forming 1–3 bars later still qualifies
-var int bullSwAge = 999
-var int bearSwAge = 999
-if bullSwNow
-    bullSwAge := 0
-else
-    bullSwAge := math.min(bullSwAge + 1, 999)
-if bearSwNow
-    bearSwAge := 0
-else
-    bearSwAge := math.min(bearSwAge + 1, 999)
-
-bullLiqReady = bullSwAge <= i_liqWin    // sweep happened recently (bull setup)
-bearLiqReady = bearSwAge <= i_liqWin    // sweep happened recently (bear setup)
-
-// ─────────────────────────────────────────────
-// ░░  FVG DETECTION  (3-candle imbalance)
-// ─────────────────────────────────────────────
-// Bullish FVG : gap between high[2] and low[0]  →  high[2] < low[0]
-//   After a bullish sweep (sweeping lows), price impulses UP leaving a gap.
-//   Entry = retrace into the FVG zone to go long.
+// ============================================================
+// ── IFVG DETECTION
+// ============================================================
+// Scan back i_ifvgLook bars for old FVGs.
+// If current close is inside an old FVG → that FVG is now an IFVG.
 //
-// Bearish FVG : gap between low[2] and high[0]  →  low[2] > high[0]
-//   After a bearish sweep (sweeping highs), price impulses DOWN leaving a gap.
-//   Entry = retrace into the FVG zone to go short.
+//  Old BULL FVG (low[i] > high[i+2]):
+//    gap zone = high[i+2]  to  low[i]
+//    If price re-enters this zone → Bearish IFVG → block BUY
+//
+//  Old BEAR FVG (high[i] < low[i+2]):
+//    gap zone = high[i]  to  low[i+2]
+//    If price re-enters this zone → Bullish IFVG → block SELL
 
-minGap = close * i_minGapPct / 100
+ifvgBearActive = false   // bearish IFVG overhead  → blocks BUY
+ifvgBullActive = false   // bullish IFVG below     → blocks SELL
 
-// Bullish FVG: gap between candle[-2].high and candle[0].low (price shot up)
-rawBull = high[2] < low[0] and (low[0] - high[2]) >= minGap
+// Track zone boundaries for drawing
+var float ifvgBearTop = na
+var float ifvgBearBot = na
+var float ifvgBullTop = na
+var float ifvgBullBot = na
 
-// Bearish FVG: gap between candle[-2].low and candle[0].high (price shot down)
-rawBear = low[2] > high[0] and (low[2] - high[0]) >= minGap
+for i = 3 to i_ifvgLook
+    // ── Old Bullish FVG
+    bullFvgTop = low[i]
+    bullFvgBot = high[i + 2]
+    if bullFvgTop > bullFvgBot
+        // Price has re-entered this old bull FVG from above = bearish IFVG
+        if close <= bullFvgTop and close >= bullFvgBot
+            ifvgBearActive := true
+            ifvgBearTop    := bullFvgTop
+            ifvgBearBot    := bullFvgBot
 
-// Gap boundaries
-bullGapTop = low[0]    // top of the bullish FVG
-bullGapBot = high[2]   // bottom of the bullish FVG
-bearGapTop = low[2]    // top of the bearish FVG
-bearGapBot = high[0]   // bottom of the bearish FVG
+    // ── Old Bearish FVG
+    bearFvgTop = low[i + 2]
+    bearFvgBot = high[i]
+    if bearFvgTop > bearFvgBot
+        // Price has re-entered this old bear FVG from below = bullish IFVG
+        if close <= bearFvgTop and close >= bearFvgBot
+            ifvgBullActive := true
+            ifvgBullTop    := bearFvgTop
+            ifvgBullBot    := bearFvgBot
 
-// ─────────────────────────────────────────────
-// ░░  FINAL SIGNAL
-//     FVG formed  +  sweep happened recently  +  in Asia session
-// ─────────────────────────────────────────────
+// ============================================================
+// ── APPLY IFVG FILTER
+// ============================================================
+ifvgBlockBuy  = i_ifvgOn and ifvgBearActive   // price in bear IFVG → no BUY
+ifvgBlockSell = i_ifvgOn and ifvgBullActive   // price in bull IFVG → no SELL
 
-bullSig = rawBull and bullLiqReady and inAsia and trendUp and bullStruct
-bullSig := bullSig and (i_dir == "Both" or i_dir == "Bullish Only")
+buySignal  = rawBuy  and not ifvgBlockBuy
+sellSignal = rawSell and not ifvgBlockSell
 
-bearSig = rawBear and bearLiqReady and inAsia and trendDown and bearStruct
-bearSig := bearSig and (i_dir == "Both" or i_dir == "Bearish Only")
+blockedBuy  = i_showBlock and rawBuy  and ifvgBlockBuy
+blockedSell = i_showBlock and rawSell and ifvgBlockSell
 
-// ─────────────────────────────────────────────
-// ░░  ENTRY / SL / TP  LEVELS
-// ─────────────────────────────────────────────
+// ============================================================
+// ── DRAW IFVG ZONES
+// ============================================================
+var bool prevBearIFVG = false
+var bool prevBullIFVG = false
 
-// Bull levels
-bullEntry = i_entryType == "FVG Mid"  ? (bullGapTop + bullGapBot) / 2 : i_entryType == "FVG Edge" ? bullGapBot : close
-bullSL    = i_slType == "Gap Edge"    ? bullGapBot * (1 - i_slBuf / 100) : i_slType == "Last Pivot" ? (not na(rPivL) ? rPivL * (1 - i_slBuf / 100) : bullGapBot * (1 - i_slBuf / 100)) : ta.lowest(low, i_slLookback) * (1 - i_slBuf / 100)
-bullRisk  = math.max(math.abs(bullEntry - bullSL), syminfo.mintick)
-bullTP1   = bullEntry + bullRisk * i_rr1
-bullTP2   = bullEntry + bullRisk * i_rr2
+if i_showIFVG
+    // Draw bearish IFVG zone when it becomes newly active
+    if ifvgBearActive and not prevBearIFVG
+        if not na(ifvgBearTop) and not na(ifvgBearBot)
+            box.new(bar_index, ifvgBearTop, bar_index + i_rrBars, ifvgBearBot,
+                    border_color=color.new(#ff1744, 20),
+                    bgcolor=i_colIFVGR, border_width=1)
+            label.new(bar_index, ifvgBearTop,
+                      "⚠ Bear IFVG — BUY blocked",
+                      style=label.style_label_down,
+                      color=color.new(#ff1744, 10),
+                      textcolor=color.white, size=size.tiny)
 
-// Bear levels
-bearEntry = i_entryType == "FVG Mid"  ? (bearGapTop + bearGapBot) / 2 : i_entryType == "FVG Edge" ? bearGapTop : close
-bearSL    = i_slType == "Gap Edge"    ? bearGapTop * (1 + i_slBuf / 100) : i_slType == "Last Pivot" ? (not na(rPivH) ? rPivH * (1 + i_slBuf / 100) : bearGapTop * (1 + i_slBuf / 100)) : ta.highest(high, i_slLookback) * (1 + i_slBuf / 100)
-bearRisk  = math.max(math.abs(bearSL - bearEntry), syminfo.mintick)
-bearTP1   = bearEntry - bearRisk * i_rr1
-bearTP2   = bearEntry - bearRisk * i_rr2
+    // Draw bullish IFVG zone when it becomes newly active
+    if ifvgBullActive and not prevBullIFVG
+        if not na(ifvgBullTop) and not na(ifvgBullBot)
+            box.new(bar_index, ifvgBullTop, bar_index + i_rrBars, ifvgBullBot,
+                    border_color=color.new(#00e676, 20),
+                    bgcolor=i_colIFVGB, border_width=1)
+            label.new(bar_index, ifvgBullBot,
+                      "⚠ Bull IFVG — SELL blocked",
+                      style=label.style_label_up,
+                      color=color.new(#00e676, 10),
+                      textcolor=color.white, size=size.tiny)
 
-// ─────────────────────────────────────────────
-// ░░  PLOTSHAPE  (must be in global scope)
-// ─────────────────────────────────────────────
+prevBearIFVG := ifvgBearActive
+prevBullIFVG := ifvgBullActive
 
-// Main signals
-plotshape(bullSig, title="Bull FVG Asia",
-     style=shape.triangleup, location=location.belowbar,
-     color=i_bullCol, size=size.normal)
+// ============================================================
+// ── BIAS RANGE BOX
+// ============================================================
+var box   biasBox  = na
+var line  biasLine = na
+var float prevH    = na
+var float prevL    = na
 
-plotshape(bearSig, title="Bear FVG Asia",
+if i_showRange and (rangeH != prevH or rangeL != prevL)
+    if not na(biasBox)
+        box.delete(biasBox)
+    if not na(biasLine)
+        line.delete(biasLine)
+    col      = biasBull ? i_colBiasB : i_colBiasR
+    biasBox  := box.new(bar_index, rangeH, bar_index + 80, rangeL,
+                    border_color=color.new(col, 30), bgcolor=col,
+                    border_width=1, extend=extend.right)
+    biasLine := line.new(bar_index, rangeMid, bar_index + 80, rangeMid,
+                    color=color.new(color.gray, 55),
+                    style=line.style_dashed, width=1, extend=extend.right)
+    prevH := rangeH
+    prevL := rangeL
+
+if i_showRange and not na(biasBox)
+    box.set_right(biasBox, bar_index + 20)
+if i_showRange and not na(biasLine)
+    line.set_x2(biasLine, bar_index + 20)
+
+// ============================================================
+// ── CRT FVG BOXES
+// ============================================================
+if i_showFVG and fvgBull
+    box.new(bar_index - 2, high[2], bar_index, low,
+            border_color=i_colFVG, bgcolor=i_colFVG, border_width=1)
+if i_showFVG and fvgBear
+    box.new(bar_index - 2, low[2], bar_index, high,
+            border_color=i_colFVG, bgcolor=i_colFVG, border_width=1)
+
+// ============================================================
+// ── RR BOX (only on valid signals)
+// ============================================================
+if i_showRR and (buySignal or sellSignal)
+    isLong    = buySignal
+    entryP    = close
+    stopP     = isLong
+                 ? math.min(rangeL, low)  - syminfo.mintick * 3
+                 : math.max(rangeH, high) + syminfo.mintick * 3
+    riskPts   = math.abs(entryP - stopP)
+    tpP       = isLong ? entryP + riskPts * i_rrMult : entryP - riskPts * i_rrMult
+    riskUSD   = i_acctSize * i_riskPct / 100.0
+    profitUSD = riskUSD * i_rrMult
+    qty       = riskPts > 0 ? riskUSD / riskPts : 0.0
+    tpPct     = riskPts / entryP * i_rrMult * 100.0
+    slPct     = riskPts / entryP * 100.0
+    band      = riskPts * 0.06
+    x1        = bar_index
+    x2        = bar_index + i_rrBars
+
+    // TP box (green)
+    box.new(x1, isLong ? tpP : entryP, x2, isLong ? entryP : tpP,
+            border_color=color.new(#00c853, 15), bgcolor=i_colTP, border_width=1)
+    // Entry band (blue)
+    box.new(x1, entryP + band, x2, entryP - band,
+            border_color=color.new(#2196f3, 0), bgcolor=i_colEntry, border_width=2)
+    // SL box (red)
+    box.new(x1, isLong ? entryP : stopP, x2, isLong ? stopP : entryP,
+            border_color=color.new(#d50000, 15), bgcolor=i_colSL, border_width=1)
+
+    // Labels
+    label.new(x1 + 2, tpP,
+              "Target: " + str.tostring(tpP, format.mintick) +
+              "  (" + str.tostring(tpPct, "#.##") + "%)" +
+              "  Qty: " + str.tostring(qty, "#.###") +
+              "  Profit: $" + str.tostring(profitUSD, "#.##"),
+              yloc=yloc.price, style=label.style_label_right,
+              color=color.new(#00c853, 10), textcolor=color.white, size=size.small)
+
+    label.new(x1 + 2, entryP,
+              "RR 1:" + str.tostring(i_rrMult, "#.#") +
+              "   Risk: $" + str.tostring(riskUSD, "#.##") +
+              "   Qty: " + str.tostring(qty, "#.###"),
+              yloc=yloc.price, style=label.style_label_right,
+              color=color.new(#1565c0, 10), textcolor=color.white, size=size.small)
+
+    label.new(x1 + 2, stopP,
+              "Stop: " + str.tostring(stopP, format.mintick) +
+              "  (" + str.tostring(slPct, "#.##") + "%)" +
+              "  Qty: " + str.tostring(qty, "#.###") +
+              "  Risk: $" + str.tostring(riskUSD, "#.##"),
+              yloc=yloc.price, style=label.style_label_right,
+              color=color.new(#d50000, 10), textcolor=color.white, size=size.small)
+
+// ============================================================
+// ── SIGNAL SHAPES
+// ============================================================
+
+// ✅ Valid BUY
+plotshape(buySignal,  title="BUY",
+     style=shape.labelup,   location=location.belowbar,
+     color=color.new(#00e676, 0), size=size.normal,
+     text="BUY", textcolor=color.white)
+
+// ✅ Valid SELL
+plotshape(sellSignal, title="SELL",
+     style=shape.labeldown, location=location.abovebar,
+     color=color.new(#ff1744, 0), size=size.normal,
+     text="SELL", textcolor=color.white)
+
+// ⊘ Blocked by bearish IFVG
+plotshape(blockedBuy, title="Blocked BUY",
+     style=shape.xcross, location=location.belowbar,
+     color=i_colBlock, size=size.small,
+     text="⊘IFVG", textcolor=i_colBlock)
+
+// ⊘ Blocked by bullish IFVG
+plotshape(blockedSell, title="Blocked SELL",
+     style=shape.xcross, location=location.abovebar,
+     color=i_colBlock, size=size.small,
+     text="⊘IFVG", textcolor=i_colBlock)
+
+// Manipulation markers
+plotshape(i_showManip and manipBull and not rawBuy, title="Manip Bull",
+     style=shape.triangleup,   location=location.belowbar,
+     color=color.new(#ff9800, 0), size=size.tiny, text="M", textcolor=color.new(#ff9800, 0))
+
+plotshape(i_showManip and manipBear and not rawSell, title="Manip Bear",
      style=shape.triangledown, location=location.abovebar,
-     color=i_bearCol, size=size.normal)
+     color=color.new(#ff9800, 0), size=size.tiny, text="M", textcolor=color.new(#ff9800, 0))
 
-// Sweep markers (small diamonds)
-plotshape(i_showSwMark and bullSwNow, title="Bull Sweep",
+// TBS dots
+plotshape(i_tbs and tbsBull and not confBull, title="TBS Bull",
+     style=shape.circle, location=location.belowbar,
+     color=i_colTBS, size=size.small, text="TBS", textcolor=i_colTBS)
+
+plotshape(i_tbs and tbsBear and not confBear, title="TBS Bear",
+     style=shape.circle, location=location.abovebar,
+     color=i_colTBS, size=size.small, text="TBS", textcolor=i_colTBS)
+
+// Confluence diamond (only on unblocked signals)
+plotshape(confBull and not ifvgBlockBuy, title="Conf Bull",
      style=shape.diamond, location=location.belowbar,
-     color=color.new(#00e676, 15), size=size.small)
+     color=i_colConf, size=size.large, text="⚡CRT+TBS", textcolor=i_colConf)
 
-plotshape(i_showSwMark and bearSwNow, title="Bear Sweep",
+plotshape(confBear and not ifvgBlockSell, title="Conf Bear",
      style=shape.diamond, location=location.abovebar,
-     color=color.new(#ff1744, 15), size=size.small)
+     color=i_colConf, size=size.large, text="⚡CRT+TBS", textcolor=i_colConf)
 
-// EMAs
-plot(ema20, "EMA 20", color=color.new(color.orange, 50), linewidth=1)
-plot(ema50, "EMA 50", color=color.new(color.blue,   50), linewidth=1)
+// ============================================================
+// ── INFO TABLE
+// ============================================================
+var table tbl = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.black, 65),
+     border_color=color.new(color.gray, 50), border_width=1)
 
-// ─────────────────────────────────────────────
-// ░░  DRAW R:R BOXES + LINES + LABELS
-// ─────────────────────────────────────────────
+if barstate.islast
+    table.cell(tbl, 0, 0, "CHART TF",  text_color=color.gray,  text_size=size.small)
+    table.cell(tbl, 1, 0, timeframe.period + (timeframe.isintraday ? "m" : ""),
+               text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 1, "BIAS TF",   text_color=color.gray,  text_size=size.small)
+    table.cell(tbl, 1, 1, biasTF,      text_color=color.aqua,  text_size=size.small)
+    table.cell(tbl, 0, 2, "RANGE H",   text_color=color.gray,  text_size=size.small)
+    table.cell(tbl, 1, 2, str.tostring(rangeH, format.mintick),
+               text_color=color.red,   text_size=size.small)
+    table.cell(tbl, 0, 3, "RANGE L",   text_color=color.gray,  text_size=size.small)
+    table.cell(tbl, 1, 3, str.tostring(rangeL, format.mintick),
+               text_color=color.lime,  text_size=size.small)
+    table.cell(tbl, 0, 4, "BIAS",      text_color=color.gray,  text_size=size.small)
+    table.cell(tbl, 1, 4, biasBull ? "BULL ▲" : "BEAR ▼",
+               text_color=biasBull ? color.lime : color.red,   text_size=size.small)
+    table.cell(tbl, 0, 5, "Bear IFVG", text_color=color.gray,  text_size=size.small)
+    table.cell(tbl, 1, 5, ifvgBearActive ? "⚠ ACTIVE" : "—",
+               text_color=ifvgBearActive ? color.red  : color.gray, text_size=size.small)
+    table.cell(tbl, 0, 6, "Bull IFVG", text_color=color.gray,  text_size=size.small)
+    table.cell(tbl, 1, 6, ifvgBullActive ? "⚠ ACTIVE" : "—",
+               text_color=ifvgBullActive ? color.lime : color.gray, text_size=size.small)
+    table.cell(tbl, 0, 7, "RR",        text_color=color.gray,  text_size=size.small)
+    table.cell(tbl, 1, 7, "1:" + str.tostring(i_rrMult, "#.#"),
+               text_color=color.yellow, text_size=size.small)
 
-var box   bxGap  = na
-var box   bxSL   = na
-var box   bxTP1  = na
-var box   bxTP2  = na
-var line  lnEnt  = na
-var line  lnSL   = na
-var line  lnTP1  = na
-var line  lnTP2  = na
-var label lbEnt  = na
-var label lbSL   = na
-var label lbTP1  = na
-var label lbTP2  = na
+// ============================================================
+// ── ALERTS
+// ============================================================
+alertcondition(i_alertBuy  and buySignal,
+     title="✅ CRT+TBS BUY — IFVG Clear",
+     message="BUY: No opposing IFVG active. CRT+TBS confirmed. RR box drawn.")
 
-var string lastSig   = "—"
-var int    sigCount  = 0
-var int    lastScore = 0
+alertcondition(i_alertSell and sellSignal,
+     title="🔴 CRT+TBS SELL — IFVG Clear",
+     message="SELL: No opposing IFVG active. CRT+TBS confirmed. RR box drawn.")
 
-// ── BULLISH ──────────────────────────────────
-if bullSig
-    sigCount += 1
-    lastSig  := "Bullish"
-    R = bar_index + i_extBars
+alertcondition(i_alertBlk and blockedBuy,
+     title="⊘ BUY Blocked — Bearish IFVG Active",
+     message="BUY signal BLOCKED: Price inside bearish IFVG zone. No trade.")
 
-    // FVG gap highlight
-    if i_showGap
-        bxGap := box.new(bar_index - 2, bullGapTop, R, bullGapBot,
-             border_color=color.new(i_bullCol, 55),
-             bgcolor     =color.new(i_bullCol, 73))
+alertcondition(i_alertBlk and blockedSell,
+     title="⊘ SELL Blocked — Bullish IFVG Active",
+     message="SELL signal BLOCKED: Price inside bullish IFVG zone. No trade.")
 
-    // SL zone (red)
-    bxSL  := box.new(bar_index, bullEntry, R, bullSL,
-         border_color=i_bearCol, bgcolor=color.new(i_bearCol, i_alpha))
-    // TP1 zone
-    bxTP1 := box.new(bar_index, bullTP1,   R, bullEntry,
-         border_color=i_bullCol, bgcolor=color.new(i_bullCol, i_alpha))
-    // TP2 zone (lighter)
-    bxTP2 := box.new(bar_index, bullTP2,   R, bullTP1,
-         border_color=color.new(i_bullCol, 40),
-         bgcolor=color.new(i_bullCol, math.min(i_alpha + 7, 99)))
+alertcondition(confBull and not ifvgBlockBuy,
+     title="⚡ Confluence BUY — IFVG + CRT + TBS",
+     message="HIGHEST PROB BUY: IFVG clear + CRT manipulation + TBS aligned bullish.")
 
-    lnEnt  := line.new(bar_index, bullEntry, R, bullEntry, color=color.white,           width=2, style=line.style_dashed)
-    lnSL   := line.new(bar_index, bullSL,    R, bullSL,    color=i_bearCol,             width=1, style=line.style_solid)
-    lnTP1  := line.new(bar_index, bullTP1,   R, bullTP1,   color=i_bullCol,             width=1, style=line.style_dotted)
-    lnTP2  := line.new(bar_index, bullTP2,   R, bullTP2,   color=color.new(i_bullCol,40),width=1,style=line.style_dotted)
-
-    if i_showLabels
-        lbEnt  := label.new(R, bullEntry, "Entry  " + str.tostring(math.round(bullEntry, 2)),
-             style=label.style_label_left, color=color.new(#1a1a2e,5), textcolor=color.white, size=size.small)
-        lbSL   := label.new(R, bullSL,    "SL  "    + str.tostring(math.round(bullSL,    2)),
-             style=label.style_label_left, color=color.new(i_bearCol,10), textcolor=color.white, size=size.small)
-        lbTP1  := label.new(R, bullTP1,   "TP1 (" + str.tostring(i_rr1) + "R)  " + str.tostring(math.round(bullTP1, 2)),
-             style=label.style_label_left, color=color.new(i_bullCol,10), textcolor=color.white, size=size.small)
-        lbTP2  := label.new(R, bullTP2,   "TP2 (" + str.tostring(i_rr2) + "R)  " + str.tostring(math.round(bullTP2, 2)),
-             style=label.style_label_left, color=color.new(i_bullCol,35), textcolor=color.white, size=size.small)
-
-// ── BEARISH ──────────────────────────────────
-if bearSig
-    sigCount += 1
-    lastSig  := "Bearish"
-    R = bar_index + i_extBars
-
-    if i_showGap
-        bxGap := box.new(bar_index - 2, bearGapTop, R, bearGapBot,
-             border_color=color.new(i_bearCol, 55),
-             bgcolor     =color.new(i_bearCol, 73))
-
-    bxSL  := box.new(bar_index, bearSL,    R, bearEntry,
-         border_color=i_bearCol, bgcolor=color.new(i_bearCol, i_alpha))
-    bxTP1 := box.new(bar_index, bearEntry, R, bearTP1,
-         border_color=i_bullCol, bgcolor=color.new(i_bullCol, i_alpha))
-    bxTP2 := box.new(bar_index, bearTP1,   R, bearTP2,
-         border_color=color.new(i_bullCol, 40),
-         bgcolor=color.new(i_bullCol, math.min(i_alpha + 7, 99)))
-
-    lnEnt  := line.new(bar_index, bearEntry, R, bearEntry, color=color.white,           width=2, style=line.style_dashed)
-    lnSL   := line.new(bar_index, bearSL,    R, bearSL,    color=i_bearCol,             width=1, style=line.style_solid)
-    lnTP1  := line.new(bar_index, bearTP1,   R, bearTP1,   color=i_bullCol,             width=1, style=line.style_dotted)
-    lnTP2  := line.new(bar_index, bearTP2,   R, bearTP2,   color=color.new(i_bullCol,40),width=1,style=line.style_dotted)
-
-    if i_showLabels
-        lbEnt  := label.new(R, bearEntry, "Entry  " + str.tostring(math.round(bearEntry, 2)),
-             style=label.style_label_left, color=color.new(#1a1a2e,5), textcolor=color.white, size=size.small)
-        lbSL   := label.new(R, bearSL,    "SL  "    + str.tostring(math.round(bearSL,    2)),
-             style=label.style_label_left, color=color.new(i_bearCol,10), textcolor=color.white, size=size.small)
-        lbTP1  := label.new(R, bearTP1,   "TP1 (" + str.tostring(i_rr1) + "R)  " + str.tostring(math.round(bearTP1, 2)),
-             style=label.style_label_left, color=color.new(i_bullCol,10), textcolor=color.white, size=size.small)
-        lbTP2  := label.new(R, bearTP2,   "TP2 (" + str.tostring(i_rr2) + "R)  " + str.tostring(math.round(bearTP2, 2)),
-             style=label.style_label_left, color=color.new(i_bullCol,35), textcolor=color.white, size=size.small)
-
-// ─────────────────────────────────────────────
-// ░░  DASHBOARD
-// ─────────────────────────────────────────────
-
-var table dash = table.new(position.top_right, 2, 10,
-     border_width=1,
-     border_color=color.new(color.gray, 55),
-     bgcolor     =color.new(#1a1a2e, 8))
-
-if i_showDash and barstate.islast
-    // Header
-    hdrCol = inAsia ? color.new(#4a148c, 15) : color.new(#37474f, 40)
-    table.cell(dash, 0, 0, "FVG  ASIA  SESSION", text_color=color.white, bgcolor=hdrCol, text_size=size.normal, text_halign=text.align_center)
-    table.cell(dash, 1, 0, inAsia ? "ACTIVE" : "OFF-HOURS", text_color=color.white, bgcolor=hdrCol, text_size=size.normal, text_halign=text.align_center)
-
-    // Session clock
-    asiaStr = "UTC " + str.tostring(i_asiaStart) + ":00 – " + str.tostring(i_asiaEnd) + ":00  |  Now " + str.tostring(utcH) + "h UTC"
-    table.cell(dash, 0, 1, "Session Window", text_color=color.white, bgcolor=color.new(color.gray, 70))
-    table.cell(dash, 1, 1, asiaStr, text_color=color.white, bgcolor=inAsia ? color.new(#4a148c, 45) : color.new(color.gray, 50))
-
-    // Trend
-    trendLbl = trendUp ? "Up (EMA20>50)" : trendDown ? "Down (EMA20<50)" : "Ranging"
-    trendCol = trendUp ? color.new(#00e676, 25) : trendDown ? color.new(#ff1744, 25) : color.new(color.gray, 25)
-    table.cell(dash, 0, 2, "Trend", text_color=color.white, bgcolor=color.new(color.gray, 70))
-    table.cell(dash, 1, 2, trendLbl, text_color=color.white, bgcolor=trendCol)
-
-    // Structure
-    strLbl = bullStruct ? "Bullish (above SwL)" : bearStruct ? "Bearish (below SwH)" : "Neutral"
-    strCol = bullStruct ? color.new(#00e676, 40) : bearStruct ? color.new(#ff1744, 40) : color.new(color.gray, 40)
-    table.cell(dash, 0, 3, "Structure", text_color=color.white, bgcolor=color.new(color.gray, 70))
-    table.cell(dash, 1, 3, strLbl, text_color=color.white, bgcolor=strCol)
-
-    // Bull sweep state
-    bSwLbl = bullSwNow ? "SWEPT  now" : bullLiqReady ? "Ready  " + str.tostring(bullSwAge) + "b ago" : "Waiting"
-    bSwCol = bullSwNow ? color.new(#00e676, 10) : bullLiqReady ? color.new(color.orange, 25) : color.new(color.gray, 55)
-    table.cell(dash, 0, 4, "Bull Sweep", text_color=color.white, bgcolor=color.new(color.gray, 70))
-    table.cell(dash, 1, 4, bSwLbl, text_color=color.white, bgcolor=bSwCol)
-
-    // Bear sweep state
-    rSwLbl = bearSwNow ? "SWEPT  now" : bearLiqReady ? "Ready  " + str.tostring(bearSwAge) + "b ago" : "Waiting"
-    rSwCol = bearSwNow ? color.new(#ff1744, 10) : bearLiqReady ? color.new(color.orange, 25) : color.new(color.gray, 55)
-    table.cell(dash, 0, 5, "Bear Sweep", text_color=color.white, bgcolor=color.new(color.gray, 70))
-    table.cell(dash, 1, 5, rSwLbl, text_color=color.white, bgcolor=rSwCol)
-
-    // Last signal
-    sigCol = lastSig == "Bullish" ? color.new(#00e676, 30) : lastSig == "Bearish" ? color.new(#ff1744, 30) : color.new(color.gray, 50)
-    table.cell(dash, 0, 6, "Last Signal", text_color=color.white, bgcolor=color.new(color.gray, 70))
-    table.cell(dash, 1, 6, lastSig, text_color=color.white, bgcolor=sigCol)
-
-    // R:R
-    table.cell(dash, 0, 7, "R:R  TP1 / TP2", text_color=color.white, bgcolor=color.new(color.gray, 70))
-    table.cell(dash, 1, 7, str.tostring(i_rr1) + "R  /  " + str.tostring(i_rr2) + "R", text_color=color.white, bgcolor=color.new(color.gray, 50))
-
-    // Entry mode
-    table.cell(dash, 0, 8, "Entry / SL Mode", text_color=color.white, bgcolor=color.new(color.gray, 70))
-    table.cell(dash, 1, 8, i_entryType + "  /  " + i_slType, text_color=color.white, bgcolor=color.new(color.gray, 50))
-
-    // Total signals
-    table.cell(dash, 0, 9, "Total Signals", text_color=color.white, bgcolor=color.new(color.gray, 70))
-    table.cell(dash, 1, 9, str.tostring(sigCount), text_color=color.white, bgcolor=color.new(color.gray, 50))
-
-// ─────────────────────────────────────────────
-// ░░  ALERTS
-// ─────────────────────────────────────────────
-alertcondition(bullSig, title="Asia Bull FVG Signal",
-     message="ASIA BULL FVG on {{ticker}} @ {{close}} | Sweep cleared, FVG Entry/SL/TP plotted.")
-alertcondition(bearSig, title="Asia Bear FVG Signal",
-     message="ASIA BEAR FVG on {{ticker}} @ {{close}} | Sweep cleared, FVG Entry/SL/TP plotted.")
-alertcondition(bullSig or bearSig, title="Asia FVG Signal (Any)",
-     message="ASIA FVG Signal on {{ticker}} @ {{close}} | Liquidity swept, FVG confirmed.")
-alertcondition(bullSwNow, title="Asia Bull Sweep",
-     message="ASIA BULL SWEEP on {{ticker}} @ {{close}} | Pivot low taken, watching for FVG.")
-alertcondition(bearSwNow, title="Asia Bear Sweep",
-     message="ASIA BEAR SWEEP on {{ticker}} @ {{close}} | Pivot high taken, watching for FVG.")
+alertcondition(confBear and not ifvgBlockSell,
+     title="⚡ Confluence SELL — IFVG + CRT + TBS",
+     message="HIGHEST PROB SELL: IFVG clear + CRT manipulation + TBS aligned bearish.")
